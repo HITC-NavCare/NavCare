@@ -48,7 +48,7 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 | --- | --- | --- |
 | Backend language (API, integrations, v1, v2) | Python | Proposed (draft 1 uses Python files) |
 | Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
-| Frontend | Undecided. A simple browser page would use HTML/CSS/JavaScript; the backend stays Python. Until then, the API can be tried in Swagger UI. | Undecided |
+| Frontend | Android app that calls the Python backend's REST API. App language (Kotlin or Java) not yet chosen. Until the app exists, the API can be tried in Swagger UI. | Decided: Android; language pending |
 | Hosting | Google Cloud (team decision). Cloud is where the app runs, not a programming language. | Planned |
 
 Planned Google Cloud services: Cloud Run (API, v1, v2), Firestore (NoSQL data), Vertex AI Gemini (v2 agent),
@@ -56,7 +56,7 @@ Secret Manager (API keys), Cloud Scheduler (ER data refresh), Google Maps Routes
 Cloud Monitoring and billing budgets (canary dashboard, costs).
 External data: WeatherAPI and Québec ER data (patient.quebec).
 
-No Java or C++ unless a specific requirement needs them. Add a new language or framework only with a clear need.
+The backend needs no Java or C++. Add a new language or framework only with a clear need.
 
 ## Coding conventions
 
