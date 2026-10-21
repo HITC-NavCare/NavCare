@@ -1,0 +1,8 @@
+# Lint settings. Run locally with: ruff check .
+target-version = "py312"
+line-length = 100
+
+[lint]
+# E, F: Ruff's default checks (style errors, unused imports, undefined names).
+# I: sorted imports. N: standard Python naming (snake_case functions, PascalCase classes).
+select = ["E", "F", "I", "N"]
