@@ -42,11 +42,42 @@ ruff check .
 `requirements.txt` is for app packages; `requirements-dev.txt` adds dev tools (Ruff).
 For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key files.
 
-## Planned stack (Google Cloud)
+## Tech stack
 
-Cloud Run (API, v1, v2), Firestore (NoSQL data), Vertex AI Gemini (v2 agent), Secret Manager (API keys),
-Cloud Scheduler (ER data refresh), Google Maps Routes API (travel time), Cloud Monitoring and billing
-budgets (canary dashboard, costs). External data: WeatherAPI and Québec ER data (patient.quebec).
+| Part | Choice | Status |
+| --- | --- | --- |
+| Backend language (API, integrations, v1, v2) | Python | Proposed (draft 1 uses Python files) |
+| Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
+| Frontend | Undecided. A simple browser page would use HTML/CSS/JavaScript; the backend stays Python. Until then, the API can be tried in Swagger UI. | Undecided |
+| Hosting | Google Cloud (team decision). Cloud is where the app runs, not a programming language. | Planned |
+
+Planned Google Cloud services: Cloud Run (API, v1, v2), Firestore (NoSQL data), Vertex AI Gemini (v2 agent),
+Secret Manager (API keys), Cloud Scheduler (ER data refresh), Google Maps Routes API (travel time),
+Cloud Monitoring and billing budgets (canary dashboard, costs).
+External data: WeatherAPI and Québec ER data (patient.quebec).
+
+No Java or C++ unless a specific requirement needs them. Add a new language or framework only with a clear need.
+
+## Coding conventions
+
+| What | Style | Example |
+| --- | --- | --- |
+| Files, functions, variables | snake_case | `travel_time.py`, `get_hospitals()`, `hospital_id` |
+| Classes (only when useful) | PascalCase | `HospitalClient` |
+| Constants | UPPER_SNAKE_CASE | `REQUEST_TIMEOUT_SECONDS` |
+
+Write `get_hospitals`, not `GetHospitals` (PascalCase means a class in Python) or `getHospitals`
+(JavaScript/Java style). Following one standard (PEP 8) means everyone can guess a name without looking it up.
+`ruff check .` flags most naming mistakes.
+
+- Indent with 4 spaces.
+- Use clear, descriptive names; avoid unexplained abbreviations (`travel_minutes`, not `tm`).
+- Keep functions short with one clear purpose. Prefer simple functions over classes or abstractions you don't need yet.
+- Comments explain *why*, not what the code already says.
+- Documentation states actual behaviour, inputs, outputs and limitations in plain English.
+- Never silently invent data or hide failures: if an API call fails, return or log a clear error.
+- Keep external field names as the API or data source defines them (for example a field from the ER data or the
+  Routes API response); don't rename them just to match Python style.
 
 ## Contributing
 
