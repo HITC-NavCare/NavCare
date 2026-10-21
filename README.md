@@ -1,16 +1,12 @@
 # NavCare
 
-NavCare recommends emergency rooms in Québec. A user sends their location (latitude, longitude)
-and gets the top 4 hospitals, ranked using travel time, current ER occupancy and weather.
+NavCare helps people find emergency rooms in Québec. The app sends the user’s location coordinates to our cloud API. The cloud API uses MSSS emergency-room data, estimated travel times and weather conditions to rank hospitals. The app shows the four options. These options are chosen by travel time, ER occupancy and weather.
 
-COEN424/6313 Fall 2026 group project. The recommender will have two versions behind the same
-REST API: **v1**, a rule-based microservice, and **v2**, an AI agent. A canary release will move
-traffic from v1 to v2 in steps, with rollback to v1.
+COEN424/6313 Fall 2026 group project. The recommender will have two versions behind the REST API. Version **v1** is a rule-based microservice. Version **v2** is an AI agent. A canary release will move traffic from **v1** to **v2** in steps. If needed traffic can be rolled back, to **v1**.
 
 ## Status
 
-Scaffold only: folders, lint check and documentation. There is no application code yet,
-nothing runs and nothing is deployed.
+Scaffold only: folders, lint check and documentation. There is no application code yet. Nothing. Nothing is deployed.
 
 ## Folders
 
@@ -33,8 +29,23 @@ Requires Python 3.12+.
 git clone https://github.com/HITC-NavCare/NavCare.git
 cd NavCare
 python -m venv .venv
-.venv\Scripts\Activate.ps1      # Windows PowerShell
-source .venv/bin/activate       # macOS / Linux
+```
+
+Activate the virtual environment with the command for your system:
+
+```powershell
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+Then install the tools and run the lint check:
+
+```bash
 pip install -r requirements-dev.txt
 ruff check .
 ```
@@ -46,17 +57,17 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 
 | Part | Choice | Status |
 | --- | --- | --- |
-| Backend language (API, integrations, v1, v2) | Python | Proposed (draft 1 uses Python files) |
+| Backend language (API, integrations, v1, v2) | Python | Proposed |
 | Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
 | Frontend | Android app that calls the Python backend's REST API. App language (Kotlin or Java) not yet chosen. Until the app exists, the API can be tried in Swagger UI. | Decided: Android; language pending |
-| Hosting | Google Cloud (team decision). Cloud is where the app runs, not a programming language. | Planned |
+| Hosting | Google Cloud (team decision). Cloud is where the app runs| Planned |
 
 Planned Google Cloud services: Cloud Run (API, v1, v2), Firestore (NoSQL data), Vertex AI Gemini (v2 agent),
 Secret Manager (API keys), Cloud Scheduler (ER data refresh), Google Maps Routes API (travel time),
 Cloud Monitoring and billing budgets (canary dashboard, costs).
 External data: WeatherAPI and Québec ER data (patient.quebec).
 
-The backend needs no Java or C++. Add a new language or framework only with a clear need.
+
 
 ## Coding conventions
 
@@ -66,7 +77,7 @@ The backend needs no Java or C++. Add a new language or framework only with a cl
 | Classes (only when useful) | PascalCase | `HospitalClient` |
 | Constants | UPPER_SNAKE_CASE | `REQUEST_TIMEOUT_SECONDS` |
 
-Write `get_hospitals`, not `GetHospitals` (PascalCase means a class in Python) or `getHospitals`
+Write `get_hospitals`, not `GetHospitals` (PascalCase) or `getHospitals`
 (JavaScript/Java style). Following one standard (PEP 8) means everyone can guess a name without looking it up.
 `ruff check .` flags most naming mistakes.
 
