@@ -2,11 +2,11 @@
 
 NavCare helps people find emergency rooms in Québec. The app sends the user’s location coordinates to our cloud API. The cloud API uses MSSS emergency-room data, estimated travel times and weather conditions to rank hospitals. The app shows the four options. These options are chosen by travel time, ER occupancy and weather.
 
-COEN424/6313 Fall 2026 group project. The recommender will have two versions behind the REST API. Version **v1** is a rule-based microservice. Version **v2** is an AI agent. A canary release will move traffic from **v1** to **v2** in steps. If needed traffic can be rolled back, to **v1**.
+COEN424/6313 Fall 2026 group project. The recommender will have two versions behind the REST API. Version **v1** is a rule-based microservice. Version **v2** is an AI agent. A canary release will move traffic from **v1** to **v2** in steps. If needed, traffic can be rolled back to **v1**.
 
 ## Status
 
-Scaffold only: folders, lint check and documentation. There is no application code yet. Nothing. Nothing is deployed.
+Scaffold only: folders, lint check and documentation. There is no application code yet. Nothing runs and nothing is deployed.
 
 ## Folders
 
@@ -60,14 +60,12 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 | Backend language (API, integrations, v1, v2) | Python | Proposed |
 | Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
 | Frontend | Android app that calls the Python backend's REST API. App language (Kotlin or Java) not yet chosen. Until the app exists, the API can be tried in Swagger UI. | Decided: Android; language pending |
-| Hosting | Google Cloud (team decision). Cloud is where the app runs| Planned |
+| Hosting | Google Cloud (team decision). Cloud is where the app runs. | Planned |
 
 Planned Google Cloud services: Cloud Run (API, v1, v2), Firestore (NoSQL data), Vertex AI Gemini (v2 agent),
 Secret Manager (API keys), Cloud Scheduler (ER data refresh), Google Maps Routes API (travel time),
 Cloud Monitoring and billing budgets (canary dashboard, costs).
 External data: WeatherAPI and Québec ER data (patient.quebec).
-
-
 
 ## Coding conventions
 
