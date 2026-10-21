@@ -2,7 +2,7 @@
 
 Summary of the COEN424/6313 Fall 2026 project description (Option A: our own service).
 The lecturer's PDF is the authority; check it if anything here is unclear.
-Work is tracked as GitHub issues; this page only lists what must be true at the end.
+This page only lists what must be true at the end; tasks will be tracked as GitHub issues.
 
 ## Mandatory
 
