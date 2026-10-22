@@ -1,0 +1,591 @@
+openapi: 3.0.3
+info:
+  title: NAVCare API
+  version: 0.1.0-draft
+  description: |
+    NAVCare ranks nearby Quebec emergency rooms (ERs) by expected time-to-care:
+    travel time plus live and historical ER occupancy.
+
+    **Not for life-threatening emergencies. Call 911.**
+
+    ER data: Quebec Ministry of Health and Social Services (MSSS), hourly ER
+    situation file, published on Données Québec under CC-BY 4.0. NAVCare stores
+    hourly snapshots to compute historical occupancy patterns.
+
+    `GET /v1/recommendations` is served by one of two implementations
+    (v1 rules engine or v2 AI agent) chosen by a canary traffic split.
+    Both return exactly the same schema; responses never reveal which
+    version answered.
+  contact:
+    name: NAVCare team (COEN 424 / COEN 6313, Fall 2026)
+    url: https://github.com/HITC-NavCare
+servers:
+  - url: https://navcare-gateway-REPLACE.northamerica-northeast1.run.app
+    description: Production (Cloud Run, Montréal). Replace with the deployed URL.
+  - url: http://localhost:8000
+    description: Local development
+tags:
+  - name: Recommendations
+    description: Ranked ER recommendations for a location
+  - name: Hospitals
+    description: Quebec ERs with live status and historical patterns
+  - name: System
+    description: Service health
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /v1/recommendations:
+    get:
+      tags: [Recommendations]
+      operationId: getRecommendations
+      summary: Recommend nearby ERs for a location
+      description: |
+        Returns the best ERs near the given location, ranked by expected
+        time-to-care. Hospitals without current data are not ranked; they are
+        listed in `unranked_nearby` instead.
+      parameters:
+        - $ref: '#/components/parameters/Lat'
+        - $ref: '#/components/parameters/Lon'
+        - name: limit
+          in: query
+          description: Number of ranked ERs to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 4
+        - name: radius_km
+          in: query
+          description: Maximum straight-line distance for candidate ERs.
+          schema:
+            type: number
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: pediatric
+          in: query
+          description: If true, return only ERs that treat children.
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          description: Ranked recommendations
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationResponse'
+              example:
+                request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+                requested_at: '2026-10-22T14:05:12-04:00'
+                data_updated_at: '2026-10-22T14:00:00-04:00'
+                origin: { lat: 45.497, lon: -73.579 }
+                radius_km: 50
+                recommendations:
+                  - rank: 1
+                    hospital:
+                      id: H0001
+                      name: Example Hospital A
+                      address: 1650 Example Ave, Montréal, QC
+                      lat: 45.497
+                      lon: -73.588
+                    travel_minutes: 9
+                    distance_km: 2.1
+                    occupancy_rate: 0.82
+                    patients_over_24h: 3
+                    expected_occupancy_at_arrival: 0.85
+                    score: 0.91
+                    reason: Short drive and moderate occupancy; usually quiet at this hour.
+                  - rank: 2
+                    hospital:
+                      id: H0002
+                      name: Example Hospital B
+                      address: 3830 Example Blvd, Montréal, QC
+                      lat: 45.473
+                      lon: -73.608
+                    travel_minutes: 14
+                    distance_km: 4.6
+                    occupancy_rate: 1.05
+                    patients_over_24h: 6
+                    expected_occupancy_at_arrival: 1.10
+                    score: 0.74
+                    reason: Close, but above capacity and usually busier at this hour.
+                unranked_nearby:
+                  - hospital:
+                      id: H0003
+                      name: Example Hospital C
+                      address: 5400 Example St, Montréal, QC
+                      lat: 45.588
+                      lon: -73.639
+                    cause: no_current_data
+                disclaimer: Not for life-threatening emergencies. Call 911.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/DataUnavailable'
+
+  /v1/hospitals:
+    get:
+      tags: [Hospitals]
+      operationId: listHospitals
+      summary: List Quebec ERs with their live status
+      parameters:
+        - name: region
+          in: query
+          description: Filter by health region name, as published by MSSS.
+          schema:
+            type: string
+          example: Montréal
+        - name: pediatric
+          in: query
+          description: If true, return only ERs that treat children.
+          schema:
+            type: boolean
+        - name: has_live_data
+          in: query
+          description: If set, return only ERs with (true) or without (false) current data.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: All matching ERs
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HospitalListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/hospitals/{hospital_id}:
+    get:
+      tags: [Hospitals]
+      operationId: getHospital
+      summary: Get one ER with live status and usual occupancy by hour
+      parameters:
+        - name: hospital_id
+          in: path
+          required: true
+          description: NAVCare hospital identifier.
+          schema:
+            type: string
+          example: H0001
+        - name: weekday
+          in: query
+          description: Day for the hourly pattern (0 = Monday … 6 = Sunday). Defaults to today (Montréal time).
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 6
+      responses:
+        '200':
+          description: The ER, its latest status and its hourly pattern
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HospitalDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Service health and data freshness
+      security: []
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                time: '2026-10-22T14:05:12-04:00'
+                data_updated_at: '2026-10-22T14:00:00-04:00'
+                data_age_minutes: 5
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: One key per developer. Default limit 60 requests/minute per key.
+
+  parameters:
+    Lat:
+      name: lat
+      in: query
+      required: true
+      description: Latitude of the user (WGS 84). Must be within Quebec.
+      schema:
+        type: number
+        format: double
+        minimum: 44.9
+        maximum: 62.6
+      example: 45.497
+    Lon:
+      name: lon
+      in: query
+      required: true
+      description: Longitude of the user (WGS 84). Must be within Quebec.
+      schema:
+        type: number
+        format: double
+        minimum: -79.8
+        maximum: -57.1
+      example: -73.579
+    Lang:
+      name: lang
+      in: query
+      description: Language of the `reason` text.
+      schema:
+        type: string
+        enum: [en, fr]
+        default: en
+
+  headers:
+    X-Request-ID:
+      description: Unique identifier of the request, also stored in the request log.
+      schema:
+        type: string
+        format: uuid
+    X-RateLimit-Remaining:
+      description: Requests left for this API key in the current minute.
+      schema:
+        type: integer
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+
+  responses:
+    BadRequest:
+      description: Invalid or missing parameter
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: invalid_parameter
+              message: lat must be between 44.9 and 62.6 (Quebec).
+              request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+    Unauthorized:
+      description: Missing, invalid or inactive API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: unauthorized
+              message: Missing or invalid X-API-Key header.
+              request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+    NotFound:
+      description: Hospital not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded for this API key
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: rate_limited
+              message: Limit of 60 requests per minute exceeded.
+              request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    DataUnavailable:
+      description: ER data is temporarily unavailable or too old to rank safely
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    HospitalSummary:
+      type: object
+      required: [id, name, lat, lon]
+      properties:
+        id:
+          type: string
+          example: H0001
+        name:
+          type: string
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lon:
+          type: number
+          format: double
+
+    Hospital:
+      allOf:
+        - $ref: '#/components/schemas/HospitalSummary'
+        - type: object
+          required: [region, pediatric, has_live_data]
+          properties:
+            region:
+              type: string
+              description: Health region, as published by MSSS.
+            pediatric:
+              type: boolean
+              description: True if the ER treats children.
+            has_live_data:
+              type: boolean
+              description: False when MSSS currently publishes no data for this ER.
+
+    LiveStatus:
+      type: object
+      description: Latest hourly snapshot from the MSSS file.
+      required: [captured_at, stretchers, on_stretcher, occupancy_rate]
+      properties:
+        captured_at:
+          type: string
+          format: date-time
+        stretchers:
+          type: integer
+          description: Functional stretchers.
+        on_stretcher:
+          type: integer
+          description: Patients currently on a stretcher.
+        occupancy_rate:
+          type: number
+          description: on_stretcher ÷ stretchers. Can exceed 1.0 when the ER is over capacity.
+          example: 1.05
+        over_24h:
+          type: integer
+          description: Patients on a stretcher for more than 24 hours.
+        over_48h:
+          type: integer
+          description: Patients on a stretcher for more than 48 hours.
+        present:
+          type: integer
+          description: People present in the ER.
+        waiting:
+          type: integer
+          description: People waiting to be seen by a physician.
+
+    HospitalWithStatus:
+      allOf:
+        - $ref: '#/components/schemas/Hospital'
+        - type: object
+          properties:
+            status:
+              $ref: '#/components/schemas/LiveStatus'
+          description: "`status` is omitted when has_live_data is false."
+
+    HourlyStat:
+      type: object
+      required: [hour, mean_occupancy, sample_count]
+      properties:
+        hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        mean_occupancy:
+          type: number
+        p90_occupancy:
+          type: number
+        sample_count:
+          type: integer
+          description: Number of hourly snapshots used.
+
+    Recommendation:
+      type: object
+      required: [rank, hospital, travel_minutes, occupancy_rate, score, reason]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        hospital:
+          $ref: '#/components/schemas/HospitalSummary'
+        travel_minutes:
+          type: number
+          description: Estimated driving time (Google Maps Routes API).
+        distance_km:
+          type: number
+        occupancy_rate:
+          type: number
+          description: Current stretcher occupancy rate.
+        patients_over_24h:
+          type: integer
+        expected_occupancy_at_arrival:
+          type: number
+          description: Usual occupancy for this weekday and arrival hour, from NAVCare's history.
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Overall score; higher is better.
+        reason:
+          type: string
+          description: Short explanation, in the requested language.
+
+    UnrankedHospital:
+      type: object
+      required: [hospital, cause]
+      properties:
+        hospital:
+          $ref: '#/components/schemas/HospitalSummary'
+        cause:
+          type: string
+          enum: [no_current_data, stale_data]
+
+    RecommendationResponse:
+      type: object
+      required: [request_id, requested_at, data_updated_at, origin, recommendations, disclaimer]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        requested_at:
+          type: string
+          format: date-time
+        data_updated_at:
+          type: string
+          format: date-time
+          description: Time of the MSSS snapshot used.
+        origin:
+          type: object
+          required: [lat, lon]
+          properties:
+            lat:
+              type: number
+            lon:
+              type: number
+        radius_km:
+          type: number
+          description: Search radius actually used (may be wider than requested if nearby ERs are full).
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        unranked_nearby:
+          type: array
+          description: Nearby ERs that could not be ranked.
+          items:
+            $ref: '#/components/schemas/UnrankedHospital'
+        disclaimer:
+          type: string
+          example: Not for life-threatening emergencies. Call 911.
+
+    HospitalListResponse:
+      type: object
+      required: [data_updated_at, count, hospitals]
+      properties:
+        data_updated_at:
+          type: string
+          format: date-time
+        count:
+          type: integer
+        hospitals:
+          type: array
+          items:
+            $ref: '#/components/schemas/HospitalWithStatus'
+
+    HospitalDetailResponse:
+      type: object
+      required: [hospital, weekday, hourly_pattern]
+      properties:
+        hospital:
+          $ref: '#/components/schemas/HospitalWithStatus'
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: Day of the hourly pattern (0 = Monday).
+        hourly_pattern:
+          type: array
+          description: Usual occupancy for each hour of that weekday.
+          items:
+            $ref: '#/components/schemas/HourlyStat'
+
+    HealthResponse:
+      type: object
+      required: [status, time]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: degraded when the latest ER snapshot is older than 2 hours.
+        time:
+          type: string
+          format: date-time
+        data_updated_at:
+          type: string
+          format: date-time
+        data_age_minutes:
+          type: integer
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - invalid_parameter
+                - unauthorized
+                - not_found
+                - rate_limited
+                - data_unavailable
+                - internal_error
+            message:
+              type: string
+            request_id:
+              type: string
+              format: uuid
