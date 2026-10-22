@@ -1,0 +1,9 @@
+# AI usage log
+
+Record AI assistance briefly, including what was used and how it was checked. Use “N/A” for unknown details. Do not include secrets or personal information.
+
+| Date | Tool/model | Purpose | What was used/checked | Instructions summary |
+| --- | --- | --- | --- | --- |
+| N/A (before draft 1) | N/A | Team-reported: AI suggested parts of the original folder structure. | Draft 1 states that `deployment/`, `tests/`, `.github/`, the Dockerfile and `requirements.txt` were recommended by AI. Checks: N/A. | N/A |
+| N/A | Claude; model: N/A | Team-reported: Claude helped draft presentation slides. | N/A | N/A |
+| 2026-10-21 | Claude Code in VS Code; model: Opus 5.5 | The AI helped convert the team’s project outline into a repository scaffold. Later requests were about simplifying READMEs, documenting the proposed tech stack and coding rules, and checking linting and secret exclusions. | The AI created and reviewed the repository structure, documentation and basic CI setup in `chore/repo-setup`. Local lint and ignore checks passed based on the tool's output. The pull request review is still pending. | Set up the scaffold from the lecturer's project description and the team's draft 1, using Google Cloud and the Routes API, a Ruff lint workflow and ignored secrets, with no fake implementations. Then simplify the docs, add the tech stack and naming conventions, and set the frontend to Android. Review the NavCare scaffold in chore/repo-setup. Check .gitignore and .env.example for secret handling and validate requirements-dev.txt, ruff.toml and .github/workflows/lint.yml. Run ruff check . and git check-ignore. Check README.md against the planned Google Cloud stack and Python naming rules. Suggest fixes, remove repetition and report any problems. Do not add features or expand the scope. |

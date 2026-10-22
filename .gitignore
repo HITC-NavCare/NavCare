@@ -1,0 +1,35 @@
+# Python caches and build output
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches and test output
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets: never commit keys, tokens or credentials.
+# Copy .env.example to .env for local values; .env stays on your machine.
+.env
+.env.*
+!.env.example
+APIKeys.txt
+*.pem
+*.key
+credentials*.json
+service-account*.json
+*-sa-key.json
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
