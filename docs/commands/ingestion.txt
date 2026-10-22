@@ -1,0 +1,35 @@
+INGESTION
+=========
+
+DOWNLOADS DATA from the MSSS website (needs internet).
+Needs: Python 3.12+ (setup.txt). No packages required.
+Run from: the repository root.
+
+
+STEP 1. Download the hourly ER file
+-----------------------------------
+
+    python app\integrations\ingestion.py
+
+Expected: "Saved ...\data\snapshots\Releve_horaire_urgences_7jours_nbpers.csv", then the
+column names and 5 rows with correct accents. The file is overwritten on each run and
+ignored by Git.
+Failed: "Download failed" or "not the expected ER CSV" means nothing was saved. Check
+your internet connection and retry later.
+
+
+STEP 2. Check the exit code
+---------------------------
+
+    $LASTEXITCODE
+
+Expected: 0. Failed: 1 (see Step 1).
+
+
+STEP 3. Run it from another folder
+----------------------------------
+
+    $script = "$PWD\app\integrations\ingestion.py"; Push-Location $env:TEMP; python $script; Pop-Location
+
+Expected: same output, and the "Saved" path is still inside the repository.
+Failed: a "Saved" path outside the repository means the script's path handling is broken.

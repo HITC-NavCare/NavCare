@@ -1,0 +1,41 @@
+GIT CHECKS
+==========
+
+LOCAL ONLY: reads Git rules, changes nothing. The files do not need to exist.
+Needs: Git. Run from: the repository root.
+
+
+STEP 1. Snapshots and secrets are ignored
+-----------------------------------------
+
+    git check-ignore --no-index -v data/snapshots/Releve_horaire_urgences_7jours_nbpers.csv .env .env.local APIKeys.txt credentials.json service-account.json my-sa-key.json private.pem private.key .venv/
+
+Expected: every path is listed with the .gitignore rule that matches it.
+Failed: a missing path is not ignored and could be committed. Add a rule to .gitignore.
+
+
+STEP 2. hospitals.csv and .env.example are not ignored
+------------------------------------------------------
+
+    git check-ignore --no-index data/hospitals.csv .env.example; $LASTEXITCODE
+
+Expected: no paths, then 1. (Do not add -v here; it shows the !.env.example exception and looks like a failure.)
+Failed: a listed path is being ignored by mistake.
+
+
+STEP 3. hospitals.csv is tracked
+--------------------------------
+
+    git ls-files data/hospitals.csv
+
+Expected: data/hospitals.csv.
+Failed: no output means it is not committed on this branch.
+
+
+STEP 4. No ignored files were committed
+---------------------------------------
+
+    git ls-files -ci --exclude-standard
+
+Expected: no output.
+Failed: listed files are committed but should be ignored. Tell the team; revoke any leaked key.

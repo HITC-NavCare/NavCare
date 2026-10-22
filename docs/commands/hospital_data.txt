@@ -1,0 +1,39 @@
+HOSPITAL DATA CHECKS
+====================
+
+LOCAL ONLY: reads files, downloads nothing.
+Needs: a snapshot from ingestion.txt (Steps 1 and 3 only). No Python needed.
+Run from: the repository root, in one terminal, in order (later steps reuse variables).
+
+
+STEP 1. Preview the downloaded ER file
+--------------------------------------
+
+    Get-Content data\snapshots\Releve_horaire_urgences_7jours_nbpers.csv -Encoding UTF8 -TotalCount 3
+
+Expected: a header and 2 rows with correct accents.
+Failed: "Cannot find path" means run ingestion.txt first.
+
+
+STEP 2. Check for blank and duplicate IDs
+-----------------------------------------
+
+    $hospitals = Import-Csv data\hospitals.csv -Encoding UTF8
+    $hospitals.Count
+    @($hospitals | Where-Object { -not $_.id.Trim() }).Count
+    $hospitals | Group-Object id | Where-Object Count -gt 1
+
+Expected: 120 (count on 2026-10-22), then 0, then no output.
+Failed: a blank or duplicate ID means hospitals.csv was edited wrongly. Check git diff data\hospitals.csv.
+
+
+STEP 3. Compare hospital IDs with the ER file
+---------------------------------------------
+
+    $erIds = Import-Csv data\snapshots\Releve_horaire_urgences_7jours_nbpers.csv -Encoding UTF8 | ForEach-Object { $_.No_permis_installation.Trim() } | Where-Object { $_ }
+    $hospitals | Where-Object { $erIds -notcontains $_.id } | Select-Object id, name
+    $erIds | Where-Object { $hospitals.id -notcontains $_ }
+
+Expected: no output from the last two lines.
+Failed: listed IDs are in one file but not the other. Investigate (compare names, check
+the MSSS sources in the README) before editing hospitals.csv.

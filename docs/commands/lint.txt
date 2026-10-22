@@ -1,0 +1,22 @@
+LINT
+====
+
+LOCAL ONLY. Same check GitHub runs on every push.
+Needs: setup.txt done once. Run from: the repository root.
+
+
+STEP 1. Activate the virtual environment (every new terminal)
+-------------------------------------------------------------
+
+    .venv\Scripts\Activate.ps1
+
+Expected: the prompt starts with (.venv).
+
+
+STEP 2. Run Ruff
+----------------
+
+    ruff check .
+
+Expected: "All checks passed!"
+Failed: fix each listed file:line problem and run it again. "not recognized" means Step 1 was skipped.

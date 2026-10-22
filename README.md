@@ -139,5 +139,6 @@ Write `get_hospitals`, not `GetHospitals` (PascalCase) or `getHospitals`
 
 ## Documentation
 
+- [Copy-paste terminal commands (PowerShell)](docs/commands/) for setup, ingestion, data checks, Git checks and lint
 - [Course requirements checklist](docs/requirements.md)
 - [AI usage log](docs/ai-usage/log.md)

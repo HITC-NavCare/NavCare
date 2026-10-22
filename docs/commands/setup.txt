@@ -1,0 +1,60 @@
+SETUP
+=====
+
+Needs: Git and Python 3.12+. Do this once per clone.
+Run from: the repository root (the folder with README.md).
+
+
+STEP 1. Check Python
+--------------------
+
+    python --version
+
+Expected: Python 3.12 or higher.
+Failed: "not found" means Python is missing. Try "py --version"; if that works, use py instead of python.
+
+
+STEP 2. Check you are in the repository root
+--------------------------------------------
+
+    Test-Path .\requirements-dev.txt
+
+Expected: True.
+Failed: False means you are in the wrong folder. cd into the cloned repository.
+
+
+STEP 3. Create the virtual environment (once)
+---------------------------------------------
+
+    python -m venv .venv
+
+Expected: a .venv folder appears. Git ignores it.
+
+
+STEP 4. Activate it (every new terminal)
+----------------------------------------
+
+    .venv\Scripts\Activate.ps1
+
+Expected: the prompt starts with (.venv).
+Failed: "running scripts is disabled" means run this, then activate again:
+
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+
+STEP 5. Install dependencies
+----------------------------
+
+    python -m pip install -r requirements-dev.txt
+
+Expected: "Successfully installed ruff-..." or "Requirement already satisfied".
+A pip "new release" notice is harmless.
+
+
+STEP 6. Confirm
+---------------
+
+    ruff --version
+
+Expected: ruff 0.17.1.
+Failed: "not recognized" means .venv is not active (Step 4) or Step 5 did not finish.
