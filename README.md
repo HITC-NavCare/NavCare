@@ -6,7 +6,8 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-Scaffold only: folders, lint check and documentation. There is no application code yet. Nothing runs and nothing is deployed.
+Scaffold plus the hospital list and a local ER-data download script (see [Hospital and ER data](#hospital-and-er-data)).
+There is no API or recommender yet. Nothing is deployed.
 
 ## Folders
 
@@ -52,6 +53,46 @@ ruff check .
 
 `requirements.txt` is for app packages; `requirements-dev.txt` adds dev tools (Ruff).
 For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key files.
+
+## Hospital and ER data
+
+Download the latest hourly ER file (standard library only; works from any folder):
+
+```bash
+python app/integrations/ingestion.py
+```
+
+It saves `data/snapshots/Releve_horaire_urgences_7jours_nbpers.csv` (UTF-8, ignored by Git) and prints the
+column names and first five rows. If accents look wrong in Git Bash, run with `PYTHONUTF8=1`.
+
+**Sources** (both MSSS, CC-BY 4.0, from Données Québec):
+
+- [Fichier horaire des données de la situation à l'urgence](https://www.donneesquebec.ca/recherche/dataset/fichier-horaire-des-donnees-de-la-situation-a-l-urgence):
+  hourly ER file. We use the
+  [`_nbpers` resource](https://www.msss.gouv.qc.ca/professionnels/statistiques/documents/urgences/Releve_horaire_urgences_7jours_nbpers.csv)
+  because it adds region, people present and people waiting for a doctor. Data are extracted every hour and published
+  about 45 minutes later; average-stay (DMS) columns are from the previous day. It is Windows-1252 encoded, and some
+  header names contain stray tabs or spaces. It has facility names, `No_permis_installation`, `RSS` and `Region`,
+  plus 16 regional-total rows and 1 province-total row (blank permit number). No addresses, coordinates or pediatric information.
+- [Fichiers cartographiques M02 des installations et établissements](https://www.donneesquebec.ca/recherche/dataset/fichiers-cartographiques-m02-des-installations-et-etablissements):
+  "Liste des installations" CSV with civic address and longitude/latitude (geocoded from the address with Adresses Québec).
+
+**`data/hospitals.csv`** lists the 120 facilities in the hourly file (checked 2026-10-22). `id` is the MSSS 8-digit
+installation code: `No_permis_installation` in the ER file, `INSTAL_COD` in M02. Every ID matched M02 exactly,
+and the name and region code also agreed for all 120. `address` is M02 `ADRESSE, MUN_NOM, QC CODE_POSTA`; `lat`/`lon` are M02
+values unchanged; `region` is the ER file's `Region`. `pediatric` is blank for all rows: no official source found
+says which ERs treat children, and blank does not mean "no".
+
+**Known limitations**
+
+- The plain `Releve_horaire_urgences_7jours.csv` resource still uses older codes for 29 of the same 120 facilities
+  (for example Hôpital général juif `12685608` vs `51248250`); those older codes are not in M02. Use the `_nbpers` file.
+- Codes can change when facilities are reorganised, so re-check `hospitals.csv` against both sources periodically.
+- On 2026-10-22 the occupancy columns read `pas d'information disponible` for 12 facilities: all 8 in
+  Mauricie-et-Centre-du-Québec and 4 of Nord-de-l'Île-de-Montréal (Sacré-Coeur, Fleury, Jean-Talon, Albert-Prévost),
+  matching the outage notice on the dataset page. Value columns are text, so parse them defensively.
+- Coordinates are address geocodes, not ER entrances. The list includes small CLSC/multiservice ERs and specialised
+  sites (for example psychiatric and cardiology institutes) because the MSSS file includes them.
 
 ## Tech stack
 
