@@ -28,6 +28,10 @@ credentials*.json
 service-account*.json
 *-sa-key.json
 
+# Downloaded data snapshots (regenerate with app/integrations/ingestion.py).
+# data/hospitals.csv stays tracked.
+data/snapshots/
+
 # Editor and OS files
 .idea/
 .vscode/
