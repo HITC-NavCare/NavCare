@@ -1,14 +1,15 @@
 import math
-
 import pandas as pd
+from pathlib import Path
 import requests
+
 
 # User location
 user_lat = 45.5017
 user_lon = -73.5673
 
 #hospitals.csv path
-hospitals_csv_path = "./../data/hospitals.csv"
+hospitals_csv_path = Path(__file__).resolve().parents[2] / "data" / "hospitals.csv"
     
 def distance_approx(lat1, lon1, lat2, lon2):#pythagoras
     lat1 = math.radians(lat1)

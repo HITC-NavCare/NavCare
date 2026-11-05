@@ -1,7 +1,9 @@
 import openmeteo_requests
+
 import pandas as pd
 import requests_cache
 from retry_requests import retry
+
 
 lat=52.52
 lon=13.41
@@ -19,21 +21,15 @@ def get_weather_data(lat, lon):
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": [
-            "temperature_2m", 
-            "rain", "showers", 
-            "snowfall", 
-            "snow_depth", 
-            "apparent_temperature", 
-            "precipitation"],
+        "hourly": ["temperature_2m", "rain", "showers", "snowfall", "snow_depth", "apparent_temperature", "precipitation"],
     }
     responses = openmeteo.weather_api(url, params = params)
 
     # Process first location. Add a for-loop for multiple locations or weather models
     response = responses[0]
-    print(f"Coordinates: {response.Latitude()}°N {response.Longitude()}°E")
-    print(f"Elevation: {response.Elevation()} m asl")
-    print(f"Timezone difference to GMT+0: {response.UtcOffsetSeconds()}s")
+    # print(f"Coordinates: {response.Latitude()}°N {response.Longitude()}°E")
+    # print(f"Elevation: {response.Elevation()} m asl")
+    # print(f"Timezone difference to GMT+0: {response.UtcOffsetSeconds()}s")
 
     # Process hourly data. The order of variables needs to be the same as requested.
     hourly = response.Hourly()
@@ -64,4 +60,5 @@ def get_weather_data(lat, lon):
 
     hourly_dataframe = pd.DataFrame(data = hourly_data)
     hours_3 =hourly_dataframe.head(3)
-    return hours_3
+    hours_3["date"] = hours_3["date"].astype(str)
+    return hours_3.to_dict(orient="records")
