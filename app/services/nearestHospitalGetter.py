@@ -1,8 +1,8 @@
 import math
-import pandas as pd
 from pathlib import Path
-import requests
 
+import pandas as pd
+import requests
 
 # User location
 user_lat = 45.5017

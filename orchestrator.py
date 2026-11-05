@@ -1,8 +1,9 @@
 import json
-from app.services.nearestHospitalGetter import get_candidate_hospitals
-from app.services.hospitalStatusGetter import get_er_data
-from app.services.weatherGetter import get_weather_data
+
 from app.recommender_v1 import rules_based_recommender as recommender
+from app.services.hospitalStatusGetter import get_er_data
+from app.services.nearestHospitalGetter import get_candidate_hospitals
+from app.services.weatherGetter import get_weather_data
 
 user_lat = 45.5017
 user_lon = -73.5673

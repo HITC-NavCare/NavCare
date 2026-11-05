@@ -1,6 +1,3 @@
-from app.services.nearestHospitalGetter import get_candidate_hospitals
-from app.services.hospitalStatusGetter import get_er_data
-from app.services.weatherGetter import get_weather_data
 
 min_distance = float('inf')
 max_distance = float('-inf')
@@ -10,8 +7,10 @@ min_precipitation = float('inf')
 max_precipitation = float('-inf')
 
 def normalize(bundled_results):
-    global min_distance, max_distance, min_travel_time, max_travel_time, min_precipitation, max_precipitation,occupancy_min
-    global  occupancy_max, waiting_min, waiting_max, over24_min, over24_max, over48_min, over48_max, stay_min, stay_max
+    global min_distance, max_distance, min_travel_time
+    global max_travel_time, min_precipitation, max_precipitation,occupancy_min
+    global  occupancy_max, waiting_min, waiting_max, over24_min
+    global over24_max, over48_min, over48_max, stay_min, stay_max
     distances = [
         hospital["hospital"]["road_distance_km"]
         for hospital in bundled_results
@@ -84,15 +83,18 @@ def normalize(bundled_results):
     stay_max = max(stays)
 
 def distance_score(dist):
-    score = (dist - min_distance) / (max_distance - min_distance) * 100 if max_distance != min_distance else 1
+    s=(dist - min_distance) / (max_distance - min_distance)
+    score =  s* 100 if max_distance != min_distance else 1
     return score
 
 def precipitation_score(precipitation):
-    score = (precipitation - min_precipitation) / (max_precipitation - min_precipitation) * 100 if max_precipitation != min_precipitation else 1
+    a=(precipitation - min_precipitation) / (max_precipitation - min_precipitation)
+    score =  a* 100 if max_precipitation != min_precipitation else 1
     return score
 
 def traveltime_score(traveltime):
-    score = (traveltime - min_travel_time) / (max_travel_time - min_travel_time) * 100 if max_travel_time != min_travel_time else 1
+    s=(traveltime - min_travel_time) / (max_travel_time - min_travel_time)
+    score =  s* 100 if max_travel_time != min_travel_time else 1
     return score
 
 def er_status_score(status):
@@ -114,14 +116,22 @@ def er_status_score(status):
         over48 = over48_max
     if stay is None:
         stay = stay_max
+    a= (occupancy - occupancy_min) / (occupancy_max - occupancy_min)
+    b = (waiting - waiting_min) / (waiting_max - waiting_min)
+    c = (over24 - over24_min) / (over24_max - over24_min)
+    d = (over48 - over48_min) / (over48_max - over48_min)
+    e = (stay - stay_min) / (stay_max - stay_min)
 
-    occ_score = (occupancy - occupancy_min) / (occupancy_max - occupancy_min) if occupancy_max != occupancy_min else 1
-    wait_score = (waiting - waiting_min) / (waiting_max - waiting_min) if waiting_max != waiting_min else 1
-    over24_score = (over24 - over24_min) / (over24_max - over24_min) if over24_max != over24_min else 1
-    over48_score = (over48 - over48_min) / (over48_max - over48_min) if over48_max != over48_min else 1
-    stay_score = (stay - stay_min) / (stay_max - stay_min) if stay_max != stay_min else 1
+    occ_score =  a if occupancy_max != occupancy_min else 1
+    wait_score = b if waiting_max != waiting_min else 1
+    over24_score = c if over24_max != over24_min else 1
+    over48_score = d if over48_max != over48_min else 1
+    stay_score = e if stay_max != stay_min else 1
 
-    score = 0.1 * occ_score + 0.3 * wait_score + 0.2 * over24_score + 0.2 * over48_score + 0.2 * stay_score
+    f= 0.1 * occ_score + 0.3 * wait_score + 0.2
+    g = 0.2 * over24_score + 0.2 * over48_score 
+    h= 0.2 * stay_score
+    score =  f+g+h
 
     return score
 
