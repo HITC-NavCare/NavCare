@@ -1,9 +1,7 @@
 import openmeteo_requests
-
 import pandas as pd
 import requests_cache
 from retry_requests import retry
-
 
 lat=52.52
 lon=13.41

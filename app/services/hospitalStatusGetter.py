@@ -1,6 +1,5 @@
 import requests
 
-
 url = "https://patient.quebec/api/public/v1/urgences"
 
 def get_er_data():
