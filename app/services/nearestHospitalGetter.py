@@ -1,5 +1,5 @@
-import pandas as pd
 import math
+import pandas as pd
 import requests
 
 # User location
@@ -9,7 +9,7 @@ user_lon = -73.5673
 #hospitals.csv path
 hospitals_csv_path = "./../data/hospitals.csv"
     
-def distanceApprox(lat1, lon1, lat2, lon2):#pythagoras
+def distance_approx(lat1, lon1, lat2, lon2):#pythagoras
     lat1 = math.radians(lat1)
     lon1 = math.radians(lon1)
     lat2 = math.radians(lat2)
@@ -49,7 +49,7 @@ def get_candidate_hospitals(user_lat, user_lon):
     # Straight-line distance
     df["crow_distance"] = df.apply(
         lambda row:
-            distanceApprox(
+            distance_approx(
                 user_lat,
                 user_lon,
                 row["lat"],

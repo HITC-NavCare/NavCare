@@ -3,7 +3,7 @@ import requests
 
 url = "https://patient.quebec/api/public/v1/urgences"
 
-def get_ER_data():
+def get_er_data():
 
     response = requests.get(url)
 

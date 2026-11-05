@@ -21,7 +21,13 @@ def get_weather_data(lat, lon):
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": ["temperature_2m", "rain", "showers", "snowfall", "snow_depth", "apparent_temperature", "precipitation"],
+        "hourly": [
+            "temperature_2m", 
+            "rain", "showers", 
+            "snowfall", 
+            "snow_depth", 
+            "apparent_temperature", 
+            "precipitation"],
     }
     responses = openmeteo.weather_api(url, params = params)
 
