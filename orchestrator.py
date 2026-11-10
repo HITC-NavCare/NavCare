@@ -1,71 +1,42 @@
 import json
 
 from app.recommender_v1 import rules_based_recommender as recommender
-from app.services.hospitalStatusGetter import get_er_data
-from app.services.nearestHospitalGetter import get_candidate_hospitals
-from app.services.weatherGetter import get_weather_data
+from app.services.hospital_status_getter import get_er_data
+from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM, get_candidate_hospitals
+from app.services.weather_getter import get_weather_data
 
-user_lat = 45.5017
-user_lon = -73.5673
-
-def get_recommended_hospitals(user_lat, user_lon):
+DISCLAIMER = "Not for life-threatening emergencies. Call 911."
 
 
-    #getting 4 candidate hospitals based on user location
-    top4_hospitals = get_candidate_hospitals(user_lat, user_lon)
-    top4_weather = []
-    top4_status = []
+def get_recommended_hospitals(
+    user_lat, user_lon, limit=recommender.DEFAULT_LIMIT, radius_km=DEFAULT_RADIUS_KM
+):
+    """Return ranked ER recommendations for a location as a JSON string.
 
+    Raises RuntimeError if a data service (routing, weather or ER status) fails.
+    """
+    # Hospitals near the user, with driving time from one routing request
+    candidates = get_candidate_hospitals(user_lat, user_lon, radius_km=radius_km)
 
-    #getting weather data for each option
-    for i in range(4):
-        lat = top4_hospitals[i]["latitude"]
-        lon = top4_hospitals[i]["longitude"]
-        weather_data = get_weather_data(lat, lon)
-        top4_weather.append(weather_data)
-        #print(weather_data)
-
-    # getting er/hospital status for each candidate hospital
-    top4_status = []
+    # ER status for all hospitals, keyed by MSSS id (same id as data/hospitals.csv)
     er_data = get_er_data()
-    er_lookup = {
-        hospital["name"]: hospital["emergency"]
-        for hospital in er_data["hospitals"]
-    }
 
-    for hospital in top4_hospitals:
-        top4_status.append(
-            er_lookup.get(hospital["name"])
-        )
+    # Weather at the user's location for the current hour; it affects the drive.
+    weather_now = get_weather_data(user_lat, user_lon)[0]
 
-    # combine all result to a single list of dictionaries for each hospital, weather and status
-    bundled_results = [
+    recommendations, unranked = recommender.recommend(candidates, er_data, weather_now, limit)
+
+    return json.dumps(
         {
-            "hospital": top4_hospitals[0],
-            "weather": top4_weather[0],
-            "status": top4_status[0]
+            "data_updated_at": er_data["updated_at"],
+            "origin": {"lat": user_lat, "lon": user_lon},
+            "radius_km": radius_km,
+            "weather_now": weather_now,
+            "travel_time_multiplier": recommender.travel_multiplier(weather_now),
+            "recommendations": recommendations,
+            "unranked_nearby": unranked,
+            "disclaimer": DISCLAIMER,
         },
-        {
-            "hospital": top4_hospitals[1],
-            "weather": top4_weather[1],
-            "status": top4_status[1]
-        },
-        {
-            "hospital": top4_hospitals[2],
-            "weather": top4_weather[2],
-            "status": top4_status[2]
-        },
-        {
-            "hospital": top4_hospitals[3],
-            "weather": top4_weather[3],
-            "status": top4_status[3]
-        },
-    ]
-    scores = recommender.recommend(bundled_results)
-    for result, score in zip(bundled_results, scores):
-        result["score"] = score
-    #sorting result based on score, the lower the score the better the hospital is
-    bundled_results.sort(key=lambda x: x["score"], reverse=False)
-    return json.dumps(bundled_results, indent=4)
-    
-    
+        indent=4,
+        ensure_ascii=False,
+    )

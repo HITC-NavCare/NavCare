@@ -1,17 +1,27 @@
+from pathlib import Path
+
 import openmeteo_requests
 import pandas as pd
 import requests_cache
 from retry_requests import retry
 
-lat=52.52
-lon=13.41
+# Inside data/snapshots/, which Git ignores, so the cache file is never committed.
+CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "snapshots" / "weather_cache"
+REQUEST_TIMEOUT_SECONDS = 15
+HOURS_RETURNED = 3
+
+CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+# Setup the Open-Meteo API client with cache and retry on error (once, shared by all calls)
+cache_session = requests_cache.CachedSession(str(CACHE_PATH), expire_after=3600)
+retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
+openmeteo = openmeteo_requests.Client(session=retry_session)
+
 
 def get_weather_data(lat, lon):
+    """Return the forecast for the current hour and the next 2 hours (first item = now).
 
-    # Setup the Open-Meteo API client with cache and retry on error
-    cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-    retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
-    openmeteo = openmeteo_requests.Client(session = retry_session)
+    Raises RuntimeError if Open-Meteo fails.
+    """
 
     # Make sure all required weather variables are listed here
     # The order of variables in hourly or daily is important to assign them correctly below
@@ -27,13 +37,13 @@ def get_weather_data(lat, lon):
             "apparent_temperature", 
             "precipitation"],
     }
-    responses = openmeteo.weather_api(url, params = params)
+    try:
+        responses = openmeteo.weather_api(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    except openmeteo_requests.OpenMeteoRequestsError as error:
+        raise RuntimeError(f"Weather request failed: {error}") from error
 
     # Process first location. Add a for-loop for multiple locations or weather models
     response = responses[0]
-    # print(f"Coordinates: {response.Latitude()}°N {response.Longitude()}°E")
-    # print(f"Elevation: {response.Elevation()} m asl")
-    # print(f"Timezone difference to GMT+0: {response.UtcOffsetSeconds()}s")
 
     # Process hourly data. The order of variables needs to be the same as requested.
     hourly = response.Hourly()
@@ -63,6 +73,11 @@ def get_weather_data(lat, lon):
     hourly_data["precipitation"] = hourly_precipitation
 
     hourly_dataframe = pd.DataFrame(data = hourly_data)
-    hours_3 =hourly_dataframe.head(3)
-    hours_3["date"] = hours_3["date"].astype(str)
-    return hours_3.to_dict(orient="records")
+    # The forecast starts at 00:00 UTC today, so skip ahead to the current hour.
+    current_hour = pd.Timestamp.now(tz="UTC").floor("h")
+    upcoming = hourly_dataframe[hourly_dataframe["date"] >= current_hour].head(HOURS_RETURNED)
+    if upcoming.empty:
+        raise RuntimeError("Weather forecast has no data for the current hour")
+    upcoming = upcoming.copy()
+    upcoming["date"] = upcoming["date"].astype(str)
+    return upcoming.to_dict(orient="records")
