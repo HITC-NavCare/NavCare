@@ -1,2 +1,7 @@
-# Packages the application needs at runtime.
-# Empty for now: add each package here when the code that uses it is written.
+# Packages the application needs at runtime (only the ones our code imports).
+# Dev tools such as Ruff go in requirements-dev.txt.
+openmeteo_requests==1.7.5
+pandas==3.1.1
+requests==2.34.2
+requests-cache==1.3.3
+retry-requests==2.0.0
