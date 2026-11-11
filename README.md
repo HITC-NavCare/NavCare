@@ -13,7 +13,7 @@ rule-based recommender, which runs locally with `python main.py`. There is no RE
 
 ```
 app/integrations/    ER-data download script
-app/services/        Routing (OSRM), weather (Open-Meteo) and live ER status (patient.quebec) clients
+app/services/        Routing (Google Routes), weather (Open-Meteo) and live ER status (patient.quebec) clients
 app/recommender_v1/  v1: rule-based ranking
 app/agent_v2/        v2: AI agent
 data/                Small sample data files (no personal information)
@@ -58,6 +58,11 @@ For a coverage report: `pytest --cov=app --cov=orchestrator --cov=main --cov-rep
 
 `requirements.txt` is for app packages; `requirements-dev.txt` adds dev tools (Ruff, pytest).
 For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key files.
+
+`python main.py` needs a Google Maps key for driving times: in the team's Google Cloud project, enable the
+**Routes API**, create an API key restricted to it, and put it in `.env` as `GOOGLE_MAPS_API_KEY`. Driving times
+use live traffic, billed per user-to-hospital pair (up to 15 per recommendation; 5,000 free per month). Set a daily
+quota cap on the Routes API in the Cloud console so usage can never go past the free amount.
 
 ## Hospital and ER data
 

@@ -1,16 +1,23 @@
 import math
+import os
 from pathlib import Path
 
 import pandas as pd
 import requests
 
 HOSPITALS_CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "hospitals.csv"
-OSRM_TABLE_URL = "https://router.project-osrm.org/table/v1/driving/"
+ROUTE_MATRIX_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+API_KEY_ENV_VAR = "GOOGLE_MAPS_API_KEY"
+# TRAFFIC_AWARE uses live traffic and is billed at the Pro rate (5,000 free elements a
+# month; each recommendation uses one element per candidate hospital).
+ROUTING_PREFERENCE = "TRAFFIC_AWARE"
+# Google returns only the fields listed here. `status` is needed to see per-route errors.
+FIELD_MASK = "originIndex,destinationIndex,status,condition,distanceMeters,duration"
 REQUEST_TIMEOUT_SECONDS = 15
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_RADIUS_KM = 50
 # Enough candidates that a quieter ER a bit farther away is still considered,
-# while keeping it to one routing request.
+# while keeping it to one routing request (and its cost to 15 billed elements).
 MAX_CANDIDATES = 15
 
 
@@ -28,34 +35,59 @@ def straight_line_km(lat1, lon1, lat2, lon2):
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
 
 
-def osrm_drive_times(user_lat, user_lon, destinations):
-    """Driving time and distance from the user to each destination, in one OSRM request.
+def get_drive_times(user_lat, user_lon, destinations):
+    """Driving time (with live traffic) and distance from the user to each destination,
+    in one Google Routes request.
 
     `destinations` is a list of (lat, lon). Returns a list of
-    {"duration_min", "distance_km"} in the same order, or None where OSRM finds no route.
-    Raises RuntimeError if OSRM fails.
+    {"duration_min", "distance_km"} in the same order, or None where there is no route.
+    Raises RuntimeError if the key is missing or the request fails.
     """
-    # OSRM wants lon,lat. The user is coordinate 0; we only need rows from the user.
-    coordinates = ";".join(
-        f"{lon},{lat}" for lat, lon in [(user_lat, user_lon), *destinations]
-    )
-    url = f"{OSRM_TABLE_URL}{coordinates}?sources=0&annotations=duration,distance"
+    api_key = os.environ.get(API_KEY_ENV_VAR)
+    if not api_key:
+        raise RuntimeError(f"Route request failed: {API_KEY_ENV_VAR} is not set")
+
+    body = {
+        "origins": [_waypoint(user_lat, user_lon)],
+        "destinations": [_waypoint(lat, lon) for lat, lon in destinations],
+        "travelMode": "DRIVE",
+        "routingPreference": ROUTING_PREFERENCE,
+    }
+    # The key goes in a header, not the URL, so it never shows up in error messages.
+    headers = {"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK}
     try:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.post(
+            ROUTE_MATRIX_URL, json=body, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
-        data = response.json()
-        if data.get("code") != "Ok":
-            raise ValueError(f"OSRM returned code {data.get('code')!r}")
-        durations = data["durations"][0][1:]
-        distances = data["distances"][0][1:]
-    except (requests.RequestException, ValueError, KeyError, IndexError) as error:
+        elements = response.json()
+        if not isinstance(elements, list):
+            raise ValueError("unexpected response format")
+        # Elements can come back in any order, and JSON leaves out an index of 0.
+        by_destination = {}
+        for element in elements:
+            if element.get("status", {}).get("code"):
+                raise ValueError(f"route error: {element['status'].get('message')}")
+            by_destination[element.get("destinationIndex", 0)] = element
+        return [_route(by_destination[index]) for index in range(len(destinations))]
+    except (requests.RequestException, ValueError, KeyError, AttributeError) as error:
         raise RuntimeError(f"Route request failed: {error}") from error
 
-    return [
-        None if duration is None or distance is None
-        else {"duration_min": duration / 60, "distance_km": distance / 1000}
-        for duration, distance in zip(durations, distances)
-    ]
+
+def _waypoint(lat, lon):
+    return {"waypoint": {"location": {"latLng": {"latitude": lat, "longitude": lon}}}}
+
+
+def _route(element):
+    """One matrix element as {"duration_min", "distance_km"}, or None if no route."""
+    if element.get("condition") != "ROUTE_EXISTS":
+        return None
+    # Duration is a string of seconds such as "160s".
+    seconds = float(element["duration"].removesuffix("s"))
+    return {
+        "duration_min": seconds / 60,
+        "distance_km": element.get("distanceMeters", 0) / 1000,
+    }
 
 
 def get_candidate_hospitals(
@@ -64,7 +96,7 @@ def get_candidate_hospitals(
     """Return hospitals within `radius_km` (straight line), nearest first, at most
     `max_candidates`, each with its road distance and driving time.
 
-    `road_distance_km` and `travel_time_min` are None when OSRM finds no road route.
+    `road_distance_km` and `travel_time_min` are None when there is no road route.
     """
     # Read id as text so it keeps its exact 8-digit form and matches the ER status ids.
     df = pd.read_csv(HOSPITALS_CSV_PATH, dtype={"id": str})
@@ -79,7 +111,7 @@ def get_candidate_hospitals(
     if nearby.empty:
         return []
 
-    routes = osrm_drive_times(
+    routes = get_drive_times(
         user_lat, user_lon, list(zip(nearby["lat"], nearby["lon"]))
     )
 
