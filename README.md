@@ -6,23 +6,24 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-Scaffold plus the hospital list and a local ER-data download script (see [Hospital and ER data](#hospital-and-er-data)).
-There is no API or recommender yet. Nothing is deployed.
+Hospital list, ER-data download script (see [Hospital and ER data](#hospital-and-er-data)) and the v1
+rule-based recommender, which runs locally with `python main.py`. There is no REST API yet. Nothing is deployed.
 
 ## Folders
 
 ```
-app/integrations/    Weather, travel-time and ER-data clients
+app/integrations/    ER-data download script
+app/services/        Routing (OSRM), weather (Open-Meteo) and live ER status (patient.quebec) clients
 app/recommender_v1/  v1: rule-based ranking
 app/agent_v2/        v2: AI agent
 data/                Small sample data files (no personal information)
 deployment/          Google Cloud deployment files
 tests/               Automated tests
 docs/                Requirements checklist and AI usage log
-.github/workflows/   Lint check on every push and pull request
+.github/workflows/   Lint and test checks on every push and pull request
 ```
 
-## Setup and lint check
+## Setup, lint and tests
 
 Requires Python 3.12+.
 
@@ -44,14 +45,18 @@ Activate the virtual environment with the command for your system:
 source .venv/bin/activate
 ```
 
-Then install the tools and run the lint check:
+Then install the tools and run the lint check and tests:
 
 ```bash
 pip install -r requirements-dev.txt
 ruff check .
+pytest
 ```
 
-`requirements.txt` is for app packages; `requirements-dev.txt` adds dev tools (Ruff).
+Tests never call the real web services (responses are faked), so they run offline in about a second.
+For a coverage report: `pytest --cov=app --cov=orchestrator --cov=main --cov-report=term-missing`.
+
+`requirements.txt` is for app packages; `requirements-dev.txt` adds dev tools (Ruff, pytest).
 For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key files.
 
 ## Hospital and ER data
@@ -133,8 +138,8 @@ Write `get_hospitals`, not `GetHospitals` (PascalCase) or `getHospitals`
 
 1. Create a branch from `main`: `git switch -c feature/short-description`
 2. Commit small changes with clear messages.
-3. Run `ruff check .`, then push and open a pull request into `main`.
-4. Merge after the lint check passes and a teammate reviews it.
+3. Run `ruff check .` and `pytest`, then push and open a pull request into `main`.
+4. Merge after the lint and test checks pass and a teammate reviews it.
 5. If AI helped, add a row to the AI usage log in the same pull request.
 
 ## Documentation

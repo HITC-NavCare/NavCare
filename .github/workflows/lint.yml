@@ -15,3 +15,14 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
+
+  # Separate job so the existing "ruff" check keeps its name. Tests never call real web services.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest --cov=app --cov=orchestrator --cov=main --cov-report=term-missing
