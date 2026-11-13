@@ -116,6 +116,16 @@ def test_get_drive_times_returns_none_when_no_route(monkeypatch):
     assert result == [None, {"duration_min": 10, "distance_km": 5}]
 
 
+def test_get_drive_times_one_failed_destination_does_not_fail_the_others(monkeypatch):
+    failed = {"destinationIndex": 0, "status": {"code": 3, "message": "bad"}}
+    matrix = [failed, element(1, 600, 5000)]
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse(matrix), []))
+
+    result = nearest.get_drive_times(45.5, -73.6, [(50.0, -60.0), (45.6, -73.7)])
+
+    assert result == [None, {"duration_min": 10, "distance_km": 5}]
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -125,12 +135,11 @@ def test_get_drive_times_returns_none_when_no_route(monkeypatch):
         FakeResponse(json_error=ValueError("not JSON")),
         FakeResponse({"error": {"code": 400, "message": "bad"}}),
         FakeResponse([]),  # no element for the destination
-        FakeResponse([{"destinationIndex": 0, "status": {"code": 3, "message": "bad"}}]),
         FakeResponse([{"destinationIndex": 0, "status": {}, "condition": "ROUTE_EXISTS"}]),
     ],
     ids=[
         "timeout", "connection", "http_403", "bad_json", "error_object", "empty",
-        "element_error", "missing_duration",
+        "missing_duration",
     ],
 )
 def test_route_failures_raise_clear_error(monkeypatch, response):

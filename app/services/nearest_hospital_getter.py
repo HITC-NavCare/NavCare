@@ -66,9 +66,13 @@ def get_drive_times(user_lat, user_lon, destinations):
         # Elements can come back in any order, and JSON leaves out an index of 0.
         by_destination = {}
         for element in elements:
+            index = element.get("destinationIndex", 0)
             if element.get("status", {}).get("code"):
-                raise ValueError(f"route error: {element['status'].get('message')}")
-            by_destination[element.get("destinationIndex", 0)] = element
+                # Google could not route this one destination. Treat it as "no route"
+                # so the other hospitals can still be ranked, instead of failing them all.
+                by_destination[index] = {"condition": "ROUTE_NOT_FOUND"}
+            else:
+                by_destination[index] = element
         return [_route(by_destination[index]) for index in range(len(destinations))]
     except (requests.RequestException, ValueError, KeyError, AttributeError) as error:
         raise RuntimeError(f"Route request failed: {error}") from error
