@@ -6,8 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-Hospital list, ER-data download script (see [Hospital and ER data](#hospital-and-er-data)) and the v1
-rule-based recommender, which runs locally with `python main.py`. There is no REST API yet. Nothing is deployed.
+The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/health and GET /v1/recommendations?lat=..&lon=... It runs locally and in Docker. Not deployed yet (Cloud Run is next). The v2 agent is not on main yet.
 
 ## Folders
 
@@ -64,6 +63,20 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 use live traffic, billed per user-to-hospital pair (up to 15 per recommendation; 5,000 free per month). Set a daily
 quota cap on the Routes API in the Cloud console so usage can never go past the free amount.
 
+## Run the API
+
+Copy .env.example to .env and set GOOGLE_MAPS_API_KEY (choose the right key for prod or dev).
+Then, in terminal run: `uvicorn app.api.main:app --reload` (Reminder to restart uvicorn whenever .env is modified)
+Next, open `http://localhost:8000/docs` to try the endpoints in Swagger UI. 
+
+With Docker (same image Cloud Run will use):
+
+`docker build -t navcare .`
+`docker run --rm -p 8080:8080 --env-file .env navcare`
+Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments and quotes as part of the value, so in .env put comments on their own line and write KEY=value with no quotes or spaces.
+
+Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails.
+
 ## Hospital and ER data
 
 Download the latest hourly ER file (standard library only; works from any folder):
@@ -109,7 +122,7 @@ says which ERs treat children, and blank does not mean "no".
 | Part | Choice | Status |
 | --- | --- | --- |
 | Backend language (API, integrations, v1, v2) | Python | Proposed |
-| Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
+| Web framework | FastAPI, a small Python framework for REST APIs | In use (app/api/main.py)
 | Frontend | Android app that calls the Python backend's REST API. App language (Kotlin or Java) not yet chosen. Until the app exists, the API can be tried in Swagger UI. | Decided: Android; language pending |
 | Hosting | Google Cloud (team decision). Cloud is where the app runs. | Planned |
 
