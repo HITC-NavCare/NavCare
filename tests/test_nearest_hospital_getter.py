@@ -34,46 +34,94 @@ def test_longitude_degree_is_shorter_than_latitude_degree_in_quebec():
     assert one_degree_east == pytest.approx(78.6, abs=0.5)
 
 
-# --- osrm_drive_times ----------------------------------------------------------------
+# --- get_drive_times -----------------------------------------------------------------
 
-def fake_get(response, calls):
-    def get(url, timeout):
-        calls.append({"url": url, "timeout": timeout})
+@pytest.fixture(autouse=True)
+def fake_api_key(monkeypatch):
+    monkeypatch.setenv(nearest.API_KEY_ENV_VAR, "test-key")
+
+
+def fake_post(response, calls):
+    def post(url, json, headers, timeout):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         if isinstance(response, Exception):
             raise response
         return response
-    return get
+    return post
 
 
-def test_osrm_drive_times_builds_one_table_request(monkeypatch):
-    calls = []
-    table = {
-        "code": "Ok",
-        "durations": [[0, 600, 1500]],
-        "distances": [[0, 5000, 12500]],
+def element(destination_index, seconds, meters):
+    return {
+        "originIndex": 0,
+        "destinationIndex": destination_index,
+        "status": {},
+        "condition": "ROUTE_EXISTS",
+        "distanceMeters": meters,
+        "duration": f"{seconds}s",
     }
-    monkeypatch.setattr(nearest.requests, "get", fake_get(FakeResponse(table), calls))
 
-    result = nearest.osrm_drive_times(45.5, -73.6, [(45.6, -73.7), (45.4, -73.5)])
+
+def test_get_drive_times_builds_one_matrix_request(monkeypatch):
+    calls = []
+    matrix = [element(0, 600, 5000), element(1, 1500, 12500)]
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse(matrix), calls))
+
+    result = nearest.get_drive_times(45.5, -73.6, [(45.6, -73.7), (45.4, -73.5)])
 
     assert result == [
         {"duration_min": 10, "distance_km": 5},
         {"duration_min": 25, "distance_km": 12.5},
     ]
     assert len(calls) == 1
-    # OSRM wants lon,lat; the user is first and the only source.
-    assert calls[0]["url"] == (
-        "https://router.project-osrm.org/table/v1/driving/"
-        "-73.6,45.5;-73.7,45.6;-73.5,45.4?sources=0&annotations=duration,distance"
-    )
+    assert calls[0]["url"] == nearest.ROUTE_MATRIX_URL
     assert calls[0]["timeout"] == nearest.REQUEST_TIMEOUT_SECONDS
+    assert calls[0]["headers"] == {
+        "X-Goog-Api-Key": "test-key",
+        "X-Goog-FieldMask": nearest.FIELD_MASK,
+    }
+    assert "status" in nearest.FIELD_MASK  # without it every route looks OK
+
+    def waypoint(lat, lon):
+        return {"waypoint": {"location": {"latLng": {"latitude": lat, "longitude": lon}}}}
+
+    assert calls[0]["json"] == {
+        "origins": [waypoint(45.5, -73.6)],  # the user is the only origin
+        "destinations": [waypoint(45.6, -73.7), waypoint(45.4, -73.5)],
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE",
+    }
 
 
-def test_osrm_drive_times_returns_none_when_no_route(monkeypatch):
-    table = {"code": "Ok", "durations": [[0, None, 600]], "distances": [[0, None, 5000]]}
-    monkeypatch.setattr(nearest.requests, "get", fake_get(FakeResponse(table), []))
+def test_get_drive_times_matches_results_by_index_not_order(monkeypatch):
+    # Google may return elements in any order, and JSON omits an index of 0.
+    first = element(0, 600, 5000)
+    del first["originIndex"], first["destinationIndex"]
+    matrix = [element(2, 60, 1000), first, element(1, 1500, 12500)]
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse(matrix), []))
 
-    result = nearest.osrm_drive_times(45.5, -73.6, [(50.0, -60.0), (45.6, -73.7)])
+    result = nearest.get_drive_times(
+        45.5, -73.6, [(45.6, -73.7), (45.4, -73.5), (45.51, -73.61)]
+    )
+
+    assert [route["duration_min"] for route in result] == [10, 25, 1]
+
+
+def test_get_drive_times_returns_none_when_no_route(monkeypatch):
+    no_route = {"destinationIndex": 0, "status": {}, "condition": "ROUTE_NOT_FOUND"}
+    matrix = [no_route, element(1, 600, 5000)]
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse(matrix), []))
+
+    result = nearest.get_drive_times(45.5, -73.6, [(50.0, -60.0), (45.6, -73.7)])
+
+    assert result == [None, {"duration_min": 10, "distance_km": 5}]
+
+
+def test_get_drive_times_one_failed_destination_does_not_fail_the_others(monkeypatch):
+    failed = {"destinationIndex": 0, "status": {"code": 3, "message": "bad"}}
+    matrix = [failed, element(1, 600, 5000)]
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse(matrix), []))
+
+    result = nearest.get_drive_times(45.5, -73.6, [(50.0, -60.0), (45.6, -73.7)])
 
     assert result == [None, {"duration_min": 10, "distance_km": 5}]
 
@@ -83,26 +131,39 @@ def test_osrm_drive_times_returns_none_when_no_route(monkeypatch):
     [
         requests.Timeout("timed out"),
         requests.ConnectionError("no network"),
-        FakeResponse(status_code=500),
+        FakeResponse(status_code=403),
         FakeResponse(json_error=ValueError("not JSON")),
-        FakeResponse({"code": "InvalidQuery", "message": "bad"}),
-        FakeResponse({"code": "Ok"}),  # missing durations/distances
-        FakeResponse({"code": "Ok", "durations": [], "distances": []}),
+        FakeResponse({"error": {"code": 400, "message": "bad"}}),
+        FakeResponse([]),  # no element for the destination
+        FakeResponse([{"destinationIndex": 0, "status": {}, "condition": "ROUTE_EXISTS"}]),
     ],
-    ids=["timeout", "connection", "http_500", "bad_json", "osrm_error", "missing_keys", "empty"],
+    ids=[
+        "timeout", "connection", "http_403", "bad_json", "error_object", "empty",
+        "missing_duration",
+    ],
 )
-def test_osrm_failures_raise_clear_error(monkeypatch, response):
-    monkeypatch.setattr(nearest.requests, "get", fake_get(response, []))
+def test_route_failures_raise_clear_error(monkeypatch, response):
+    monkeypatch.setattr(nearest.requests, "post", fake_post(response, []))
 
     with pytest.raises(RuntimeError, match="Route request failed"):
-        nearest.osrm_drive_times(45.5, -73.6, [(45.6, -73.7)])
+        nearest.get_drive_times(45.5, -73.6, [(45.6, -73.7)])
+
+
+def test_missing_api_key_raises_clear_error_without_calling_google(monkeypatch):
+    calls = []
+    monkeypatch.delenv(nearest.API_KEY_ENV_VAR)
+    monkeypatch.setattr(nearest.requests, "post", fake_post(FakeResponse([]), calls))
+
+    with pytest.raises(RuntimeError, match="GOOGLE_MAPS_API_KEY is not set"):
+        nearest.get_drive_times(45.5, -73.6, [(45.6, -73.7)])
+    assert calls == []
 
 
 # --- get_candidate_hospitals ---------------------------------------------------------
 
 @pytest.fixture
 def fake_routes(monkeypatch):
-    """Replace OSRM: drive time = 2 min per straight-line km. Records each call."""
+    """Replace Google Routes: drive time = 2 min per straight-line km. Records each call."""
     calls = []
 
     def drive_times(user_lat, user_lon, destinations):
@@ -115,7 +176,7 @@ def fake_routes(monkeypatch):
             for lat, lon in destinations
         ]
 
-    monkeypatch.setattr(nearest, "osrm_drive_times", drive_times)
+    monkeypatch.setattr(nearest, "get_drive_times", drive_times)
     return calls
 
 
@@ -171,7 +232,7 @@ def test_ids_keep_leading_zeros_and_missing_routes_are_none(tmp_path, monkeypatc
     monkeypatch.setattr(nearest, "HOSPITALS_CSV_PATH", csv_path)
     monkeypatch.setattr(
         nearest,
-        "osrm_drive_times",
+        "get_drive_times",
         lambda lat, lon, destinations: [{"duration_min": 3, "distance_km": 1}, None],
     )
 
