@@ -75,7 +75,9 @@ With Docker (same image Cloud Run will use):
 `docker run --rm -p 8080:8080 --env-file .env navcare`
 Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments and quotes as part of the value, so in .env put comments on their own line and write KEY=value with no quotes or spaces.
 
-Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails.
+Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
+
+The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) will answer behind the same paths, and the `engine` field in each response says which one answered (`v1` for now).
 
 ## Hospital and ER data
 

@@ -1,5 +1,10 @@
-"""NAVCare REST API. Run locally with:  uvicorn app.api.main:app --reload"""
+"""NAVCare REST API. Run locally with:  uvicorn app.api.main:app --reload
 
+The /v1 in the paths is the API version, not the recommender engine. Both engines
+(v1 rules, v2 agent) will answer behind the same paths; `engine` says which one did.
+"""
+
+import logging
 from datetime import datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -17,6 +22,14 @@ from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM
 load_dotenv()
 
 MONTREAL = ZoneInfo("America/Montreal")
+ENGINE = "v1"  # the only engine behind the API for now
+
+# Shown to clients instead of our internal error text. The details go to the logs,
+# with the request id, so a failed request can still be traced.
+DATA_UNAVAILABLE_MESSAGE = "A data source is temporarily unavailable. Please try again later."
+INTERNAL_ERROR_MESSAGE = "Unexpected server error."
+
+logger = logging.getLogger("navcare.api")
 
 app = FastAPI(
     title="NAVCare API",
@@ -52,6 +65,14 @@ async def invalid_parameter(request: Request, error: RequestValidationError):
                           request.state.request_id)
 
 
+@app.exception_handler(Exception)
+async def internal_error(request: Request, error: Exception):
+    # Any bug we did not expect: same error body and request id as other errors.
+    request_id = getattr(request.state, "request_id", None) or str(uuid4())
+    logger.error("request_id=%s unexpected error", request_id, exc_info=error)
+    return error_response(500, "internal_error", INTERNAL_ERROR_MESSAGE, request_id)
+
+
 @app.get("/v1/health")
 def get_health():
     return {"status": "ok", "time": datetime.now(MONTREAL).isoformat()}
@@ -70,9 +91,12 @@ def get_recommendations(
         result = orchestrator.build_recommendations(lat, lon, limit=limit, radius_km=radius_km)
     except RuntimeError as error:
         # A data service (routing, weather or ER status) failed: say so, don't guess.
-        return error_response(503, "data_unavailable", str(error), request_id)
+        logger.warning("request_id=%s data unavailable: %s", request_id, error)
+        return error_response(503, "data_unavailable", DATA_UNAVAILABLE_MESSAGE, request_id)
     return {
         "request_id": request_id,
         "requested_at": datetime.now(MONTREAL).isoformat(),
+        "engine": ENGINE,
         **result,
     }
+
