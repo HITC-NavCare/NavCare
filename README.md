@@ -6,8 +6,9 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-Hospital list, ER-data download script (see [Hospital and ER data](#hospital-and-er-data)) and the v1
-rule-based recommender, which runs locally with `python main.py`. There is no REST API yet. Nothing is deployed.
+Hospital list, ER-data download script (see [Hospital and ER data](#hospital-and-er-data)), the v1
+rule-based recommender (`python main.py`) and the v2 AI agent (`python main.py v2`, see
+[v2 AI agent](#v2-ai-agent)). Both run locally. There is no REST API yet. Nothing is deployed.
 
 ## Folders
 
@@ -15,7 +16,7 @@ rule-based recommender, which runs locally with `python main.py`. There is no RE
 app/integrations/    ER-data download script
 app/services/        Routing (Google Routes), weather (Open-Meteo) and live ER status (patient.quebec) clients
 app/recommender_v1/  v1: rule-based ranking
-app/agent_v2/        v2: AI agent
+app/agent_v2/        v2: AI agent (Gemini on Vertex AI chooses the tools to call and the ERs)
 data/                Small sample data files (no personal information)
 deployment/          Google Cloud deployment files
 tests/               Automated tests
@@ -63,6 +64,41 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 **Routes API**, create an API key restricted to it, and put it in `.env` as `GOOGLE_MAPS_API_KEY`. Driving times
 use live traffic, billed per user-to-hospital pair (up to 15 per recommendation; 5,000 free per month). Set a daily
 quota cap on the Routes API in the Cloud console so usage can never go past the free amount.
+
+## v2 AI agent
+
+v2 takes the same location as v1 plus an optional message in the person's own words:
+
+```bash
+python main.py v2 my 6-year-old has a high fever
+```
+
+Gemini (on Vertex AI) decides which of our services to call (nearby hospitals with driving times, live ER
+status, weather), then chooses up to four ERs and writes a reason for each. Unlike v1 it can recommend a
+children's, mental-health or cardiology ER when the message calls for one, sets `call_911` when the message
+sounds life-threatening, and answers in French or English.
+
+- **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
+  (model calls, tool calls and tokens for the request).
+- **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
+  data, and an id that was not returned by our services is rejected.
+- **Fallback:** if Gemini fails or gives an invalid answer, the v1 ranking is returned with
+  `engine: "v1_fallback"` and a `fallback_reason`.
+- **Not deterministic:** the same request can give a different order or wording each time.
+- **Limits per request:** 8 model calls, 2 hospital searches (each search is one Google Routes request),
+  30 seconds per model call and 60 seconds in total. Temporary Gemini errors (429, 500, 503) are retried once.
+- **Fallback note:** when v2 falls back after the person wrote a message, `note` says the message was not read
+  and points to the specialised ERs in `unranked_nearby`.
+
+Setup (once per machine):
+
+1. In the team's Google Cloud project, enable the **Vertex AI API**. Your account needs the *Vertex AI User* role.
+2. Install the [gcloud CLI](https://cloud.google.com/sdk/docs/install) and run
+   `gcloud auth application-default login`. Vertex AI uses this sign-in, not an API key.
+3. In `.env`, set `GOOGLE_CLOUD_PROJECT` to the project id.
+
+Model calls are billed to the project (covered by the trial credit while it lasts). Tests fake Gemini, so they
+cost nothing.
 
 ## Hospital and ER data
 
