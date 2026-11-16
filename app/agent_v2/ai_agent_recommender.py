@@ -16,7 +16,7 @@ import os
 import time
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from app.recommender_v1 import rules_based_recommender as recommender
 from app.services.hospital_status_getter import get_er_data
@@ -38,7 +38,7 @@ THINKING_LEVEL = "LOW"
 
 # Limits that keep one request's cost and time bounded.
 MAX_MODEL_CALLS = 8
-MAX_TOTAL_SECONDS = 60  # no new Gemini call is started after this; v1 is used instead
+MAX_TOTAL_SECONDS = 60  # for all Gemini calls of one request; after this, v1 is used
 MAX_ROUTE_SEARCHES = 2  # each search is one Google Routes request (up to 15 billed elements)
 MAX_RADIUS_KM = 150
 MAX_MESSAGE_CHARS = 500
@@ -199,7 +199,14 @@ class Toolbox:
             return {"error": "Search limit reached. Choose from the hospitals already found."}
         radius_km = min(max(float(radius_km), 1), MAX_RADIUS_KM)
         self.route_searches += 1
-        found = get_candidate_hospitals(self.user_lat, self.user_lon, radius_km=radius_km)
+        try:
+            found = get_candidate_hospitals(self.user_lat, self.user_lon, radius_km=radius_km)
+        except RuntimeError as error:
+            if self.hospitals:
+                raise  # an extra search failed: tell the model, it can use the first results
+            # Without any hospitals there is nothing to choose from. Stop here, so an empty
+            # answer is never returned as if no hospital were nearby.
+            raise AgentError(f"hospital search failed: {error}") from error
         self.radius_km = max(self.radius_km or 0, radius_km)
         for hospital in found:
             self.hospitals[hospital["id"]] = hospital
@@ -259,6 +266,8 @@ class Toolbox:
         items = args.get("recommendations")
         if not isinstance(items, list):
             return None, "recommendations must be a list."
+        if not isinstance(args.get("call_911"), bool):
+            return None, "call_911 must be true or false."
         reachable = [h for h in self.hospitals.values() if h["travel_time_min"] is not None]
         if not items and reachable:
             return None, "Recommend at least one hospital."
@@ -292,13 +301,30 @@ def make_client():
         vertexai=True,
         project=os.environ.get(PROJECT_ENV_VAR),
         location=os.environ.get(LOCATION_ENV_VAR, DEFAULT_LOCATION),
-        http_options=types.HttpOptions(
-            timeout=REQUEST_TIMEOUT_MS,
-            retry_options=types.HttpRetryOptions(
-                attempts=RETRY_ATTEMPTS, http_status_codes=RETRY_STATUS_CODES
-            ),
-        ),
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
     )
+
+
+def _generate(client, model, contents, config, deadline):
+    """One Gemini call, retried once on a temporary error, never running past the deadline."""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise AgentError(f"Gemini did not finish within {MAX_TOTAL_SECONDS} seconds")
+        # Each try gets at most the time that is left, so the total limit holds.
+        timed_config = config.model_copy(update={
+            "http_options": types.HttpOptions(timeout=min(REQUEST_TIMEOUT_MS, remaining_ms)),
+        })
+        try:
+            return client.models.generate_content(
+                model=model, contents=contents, config=timed_config
+            )
+        except errors.APIError as error:
+            if error.code in RETRY_STATUS_CODES and attempt < RETRY_ATTEMPTS:
+                continue
+            raise AgentError(f"Gemini request failed: {error}") from error
+        except Exception as error:  # the SDK raises many types: auth, network, timeout
+            raise AgentError(f"Gemini request failed: {error}") from error
 
 
 def build_request_text(message, limit):
@@ -340,16 +366,9 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
     except Exception as error:  # missing project or credentials
         raise AgentError(f"Gemini client could not be created: {error}") from error
 
-    started = time.monotonic()
+    deadline = time.monotonic() + MAX_TOTAL_SECONDS
     for _ in range(MAX_MODEL_CALLS):
-        if time.monotonic() - started > MAX_TOTAL_SECONDS:
-            raise AgentError(f"Gemini did not finish within {MAX_TOTAL_SECONDS} seconds")
-        try:
-            response = client.models.generate_content(
-                model=model, contents=contents, config=config
-            )
-        except Exception as error:  # the SDK raises many types: API, auth, network, timeout
-            raise AgentError(f"Gemini request failed: {error}") from error
+        response = _generate(client, model, contents, config, deadline)
         _count_usage(usage, response)
 
         calls = response.function_calls
@@ -443,7 +462,7 @@ def _build_result(toolbox, choices, args, usage):
         "travel_time_multiplier": multiplier,
         "recommendations": recommendations,
         "unranked_nearby": unranked,
-        "call_911": args.get("call_911") is True,
+        "call_911": args["call_911"],
         "note": note.strip() if isinstance(note, str) and note.strip() else None,
         "model_usage": usage,
     }

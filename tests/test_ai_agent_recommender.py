@@ -1,7 +1,7 @@
 """Tests for the v2 agent. Gemini is faked: each test scripts the tool calls the model makes."""
 
 import pytest
-from google.genai import types
+from google.genai import errors, types
 
 from app.agent_v2 import ai_agent_recommender as agent
 from app.recommender_v1 import rules_based_recommender as recommender
@@ -369,8 +369,13 @@ def test_bad_tool_calls_get_an_error_result(services, call, expected):
         (submit(), "at least one"),
         (("submit_recommendations", {"recommendations": "A", "call_911": False}), "must be a list"),
         (("submit_recommendations", {"recommendations": ["A"], "call_911": False}), "Unknown"),
+        (("submit_recommendations", {"recommendations": []}), "call_911 must be"),
+        (("submit_recommendations", {"recommendations": [], "call_911": "no"}), "call_911 must be"),
     ],
-    ids=["unknown_id", "no_route", "duplicate", "empty_reason", "empty", "not_list", "not_dict"],
+    ids=[
+        "unknown_id", "no_route", "duplicate", "empty_reason", "empty", "not_list", "not_dict",
+        "missing_911", "bad_911",
+    ],
 )
 def test_invalid_answer_is_sent_back_for_correction(services, bad, expected):
     client = FakeClient(turn(FIND), turn(bad), turn(submit(("A", "Closest."))))
@@ -441,6 +446,81 @@ def test_agent_stops_when_total_time_runs_out(services, monkeypatch):
     with pytest.raises(agent.AgentError, match="did not finish within 60 seconds"):
         agent.run_agent(45.5, -73.6, client=client)
     assert len(client.requests) == 1  # the second call was never started
+    assert client.requests[0]["config"].http_options.timeout == agent.REQUEST_TIMEOUT_MS
+
+
+def test_a_call_only_gets_the_time_that_is_left(services, monkeypatch):
+    clock = iter([0, 5, agent.MAX_TOTAL_SECONDS - 12])
+    monkeypatch.setattr(agent.time, "monotonic", lambda: next(clock))
+    client = FakeClient(turn(FIND), turn(submit(("A", "Closest."))))
+
+    agent.run_agent(45.5, -73.6, client=client)
+
+    assert client.requests[1]["config"].http_options.timeout == 12_000
+
+
+def api_error(code):
+    return errors.APIError(code, {"error": {"code": code, "message": "failed", "status": "X"}})
+
+
+def test_temporary_gemini_error_is_retried_once(services):
+    client = FakeClient(api_error(503), turn(FIND), turn(submit(("A", "Closest."))))
+
+    result = agent.run_agent(45.5, -73.6, client=client)
+
+    assert len(client.requests) == 3
+    assert len(result["recommendations"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("replies", "requests_made"),
+    [
+        ([api_error(503), api_error(503)], 2),  # only one retry
+        ([api_error(504)], 1),  # a deadline retry would just wait again
+        ([api_error(403)], 1),
+    ],
+    ids=["retry_fails_too", "deadline", "permission"],
+)
+def test_gemini_errors_that_end_the_run(services, replies, requests_made):
+    client = FakeClient(*replies, turn(FIND))
+
+    with pytest.raises(agent.AgentError, match="Gemini request failed"):
+        agent.run_agent(45.5, -73.6, client=client)
+    assert len(client.requests) == requests_made
+
+
+def test_failed_first_hospital_search_ends_the_run(services, monkeypatch):
+    def failing(lat, lon, radius_km):
+        raise RuntimeError("Route request failed: timed out")
+
+    monkeypatch.setattr(agent, "get_candidate_hospitals", failing)
+    # Without this, the model could submit an empty list and it would look like success.
+    client = FakeClient(turn(FIND), turn(submit()))
+
+    with pytest.raises(agent.AgentError, match="hospital search failed: Route request failed"):
+        agent.run_agent(45.5, -73.6, client=client)
+    assert len(client.requests) == 1
+
+
+def test_failed_second_hospital_search_is_reported_to_the_model(services, monkeypatch):
+    real = agent.get_candidate_hospitals
+    attempts = []
+
+    def second_fails(lat, lon, radius_km):
+        attempts.append(radius_km)
+        if len(attempts) == 2:
+            raise RuntimeError("Route request failed: timed out")
+        return real(lat, lon, radius_km=radius_km)
+
+    monkeypatch.setattr(agent, "get_candidate_hospitals", second_fails)
+    client = FakeClient(
+        turn(FIND), turn(("find_hospitals", {"radius_km": 100})), turn(submit(("A", "Closest.")))
+    )
+
+    result = agent.run_agent(45.5, -73.6, client=client)
+
+    assert "Route request failed" in client.tool_results(2)["find_hospitals"]["error"]
+    assert [r["hospital"]["id"] for r in result["recommendations"]] == ["A"]
 
 
 def test_client_creation_failure_raises_agent_error(services, monkeypatch):
@@ -476,7 +556,3 @@ def test_make_client_uses_vertex_ai_with_project_and_location(monkeypatch):
     assert created["project"] == "navcare-test"
     assert created["location"] == "global"
     assert created["http_options"].timeout == agent.REQUEST_TIMEOUT_MS
-    retry = created["http_options"].retry_options
-    assert retry.attempts == 2
-    assert 504 not in retry.http_status_codes  # a deadline retry would just wait again
-    assert set(retry.http_status_codes) == {429, 500, 503}

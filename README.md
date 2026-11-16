@@ -6,9 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-Hospital list, ER-data download script (see [Hospital and ER data](#hospital-and-er-data)), the v1
-rule-based recommender (`python main.py`) and the v2 AI agent (`python main.py v2`, see
-[v2 AI agent](#v2-ai-agent)). Both run locally. There is no REST API yet. Nothing is deployed.
+The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/health and GET /v1/recommendations?lat=..&lon=... It runs locally and in Docker. Not deployed yet (Cloud Run is next). The v2 AI agent runs locally with `python main.py v2` (see [v2 AI agent](#v2-ai-agent)); it is not behind the API yet.
 
 ## Folders
 
@@ -65,6 +63,22 @@ For local API keys, copy `.env.example` to `.env`. Never commit `.env` or key fi
 use live traffic, billed per user-to-hospital pair (up to 15 per recommendation; 5,000 free per month). Set a daily
 quota cap on the Routes API in the Cloud console so usage can never go past the free amount.
 
+## Run the API
+
+Copy .env.example to .env and set GOOGLE_MAPS_API_KEY (choose the right key for prod or dev).
+Then, in terminal run: `uvicorn app.api.main:app --reload` (Reminder to restart uvicorn whenever .env is modified)
+Next, open `http://localhost:8000/docs` to try the endpoints in Swagger UI. 
+
+With Docker (same image Cloud Run will use):
+
+`docker build -t navcare .`
+`docker run --rm -p 8080:8080 --env-file .env navcare`
+Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments and quotes as part of the value, so in .env put comments on their own line and write KEY=value with no quotes or spaces.
+
+Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
+
+The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) will answer behind the same paths, and the `engine` field in each response says which one answered (`v1` for now).
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words:
@@ -86,7 +100,10 @@ sounds life-threatening, and answers in French or English.
   `engine: "v1_fallback"` and a `fallback_reason`.
 - **Not deterministic:** the same request can give a different order or wording each time.
 - **Limits per request:** 8 model calls, 2 hospital searches (each search is one Google Routes request),
-  30 seconds per model call and 60 seconds in total. Temporary Gemini errors (429, 500, 503) are retried once.
+  30 seconds per model call and 60 seconds in total (each call only gets the time that is left).
+  Temporary Gemini errors (429, 500, 503) are retried once.
+- **No hospitals, no answer:** if the first hospital search fails, v2 stops and falls back, instead of
+  returning an empty list as if nothing were nearby.
 - **Fallback note:** when v2 falls back after the person wrote a message, `note` says the message was not read
   and points to the specialised ERs in `unranked_nearby`.
 
@@ -145,7 +162,7 @@ says which ERs treat children, and blank does not mean "no".
 | Part | Choice | Status |
 | --- | --- | --- |
 | Backend language (API, integrations, v1, v2) | Python | Proposed |
-| Web framework | FastAPI, a small Python framework for REST APIs | Proposed, not installed |
+| Web framework | FastAPI, a small Python framework for REST APIs | In use (app/api/main.py)
 | Frontend | Android app that calls the Python backend's REST API. App language (Kotlin or Java) not yet chosen. Until the app exists, the API can be tried in Swagger UI. | Decided: Android; language pending |
 | Hosting | Google Cloud (team decision). Cloud is where the app runs. | Planned |
 

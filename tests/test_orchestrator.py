@@ -129,6 +129,15 @@ def test_agent_response_adds_engine_origin_and_disclaimer(monkeypatch):
     assert "HÔPITAL A" in output
 
 
+def test_build_agent_recommendations_returns_a_dict_for_the_api(monkeypatch):
+    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, "fever")
+
+    assert result["engine"] == "v2"
+    assert result == json.loads(orchestrator.get_agent_recommended_hospitals(45.5, -73.6, "fever"))
+
+
 def test_agent_response_has_every_v1_field(fake_services, monkeypatch):
     monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
 
