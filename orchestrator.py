@@ -8,10 +8,10 @@ from app.services.weather_getter import get_weather_data
 DISCLAIMER = "Not for life-threatening emergencies. Call 911."
 
 
-def get_recommended_hospitals(
+def build_recommendations(
     user_lat, user_lon, limit=recommender.DEFAULT_LIMIT, radius_km=DEFAULT_RADIUS_KM
 ):
-    """Return ranked ER recommendations for a location as a JSON string.
+    """Return ranked ER recommendations for a location as a dict (used by the API).
 
     Raises RuntimeError if a data service (routing, weather or ER status) fails.
     """
@@ -26,17 +26,21 @@ def get_recommended_hospitals(
 
     recommendations, unranked = recommender.recommend(candidates, er_data, weather_now, limit)
 
-    return json.dumps(
-        {
-            "data_updated_at": er_data["updated_at"],
-            "origin": {"lat": user_lat, "lon": user_lon},
-            "radius_km": radius_km,
-            "weather_now": weather_now,
-            "travel_time_multiplier": recommender.travel_multiplier(weather_now),
-            "recommendations": recommendations,
-            "unranked_nearby": unranked,
-            "disclaimer": DISCLAIMER,
-        },
-        indent=4,
-        ensure_ascii=False,
-    )
+    return {
+        "data_updated_at": er_data["updated_at"],
+        "origin": {"lat": user_lat, "lon": user_lon},
+        "radius_km": radius_km,
+        "weather_now": weather_now,
+        "travel_time_multiplier": recommender.travel_multiplier(weather_now),
+        "recommendations": recommendations,
+        "unranked_nearby": unranked,
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def get_recommended_hospitals(
+    user_lat, user_lon, limit=recommender.DEFAULT_LIMIT, radius_km=DEFAULT_RADIUS_KM
+):
+    """Same as build_recommendations, as a JSON string for printing (main.py)."""
+    result = build_recommendations(user_lat, user_lon, limit=limit, radius_km=radius_km)
+    return json.dumps(result, indent=4, ensure_ascii=False)
