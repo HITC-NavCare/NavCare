@@ -7,11 +7,16 @@ from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM, get_candidat
 from app.services.weather_getter import get_weather_data
 
 DISCLAIMER = "Not for life-threatening emergencies. Call 911."
-# Shown when v2 falls back to v1 after the person wrote a message, since v1 cannot read it.
-FALLBACK_NOTE = (
-    "The assistant was unavailable, so your message was not taken into account. "
+# v1 cannot read the person's message. These notes say so when v1 answers a request that
+# had one: MESSAGE_NOT_READ_NOTE when the facade chose v1, FALLBACK_NOTE when v2 failed.
+_SPECIALISED_HINT = (
     "These are general ERs. If the patient is a child, or the problem is mental health "
     "or the heart, a specialised ER listed under unranked_nearby may be more suitable."
+)
+MESSAGE_NOT_READ_NOTE = "Your message was not taken into account. " + _SPECIALISED_HINT
+FALLBACK_NOTE = (
+    "The assistant was unavailable, so your message was not taken into account. "
+    + _SPECIALISED_HINT
 )
 
 
@@ -46,18 +51,20 @@ def build_recommendations(
 
 
 def build_agent_recommendations(
-    user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT
+    user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
+    radius_km=DEFAULT_RADIUS_KM,
 ):
     """v2 (AI agent): like v1, but Gemini chooses, using the person's optional message.
 
     Returns a dict with the v1 fields plus engine, call_911, note and model_usage. If Gemini
     fails or gives an invalid answer, the v1 ranking is returned instead, marked as a fallback.
+    radius_km is only used by that fallback; the agent chooses its own search radius.
     Raises RuntimeError if the fallback's data services fail too.
     """
     try:
         result = agent.run_agent(user_lat, user_lon, message, limit)
     except agent.AgentError as error:
-        response = build_recommendations(user_lat, user_lon, limit=limit)
+        response = build_recommendations(user_lat, user_lon, limit=limit, radius_km=radius_km)
         response.update({
             "engine": "v1_fallback",
             "fallback_reason": str(error),

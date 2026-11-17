@@ -167,6 +167,17 @@ def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
     assert [r["hospital"]["id"] for r in result["recommendations"]] == ["B"]
 
 
+def test_agent_fallback_uses_the_requested_radius(fake_services, monkeypatch):
+    def failing(*args):
+        raise orchestrator.agent.AgentError("Gemini request failed: 503")
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, radius_km=20)
+
+    assert result["radius_km"] == 20
+
+
 @pytest.mark.parametrize("message", [None, "", "   "])
 def test_agent_fallback_has_no_note_without_a_message(fake_services, monkeypatch, message):
     def failing(*args):

@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/health and GET /v1/recommendations?lat=..&lon=... It runs locally and in Docker. Not deployed yet (Cloud Run is next). The v2 AI agent runs locally with `python main.py v2` (see [v2 AI agent](#v2-ai-agent)); it is not behind the API yet.
+The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet (Cloud Run is next).
 
 ## Folders
 
@@ -77,11 +77,33 @@ Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments 
 
 Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
 
-The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) will answer behind the same paths, and the `engine` field in each response says which one answered (`v1` for now).
+The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) answer behind the same paths, and the `engine` field in each response says which one answered (`v1`, `v2`, or `v1_fallback` when v2 failed).
+
+### Choosing v1 or v2 (facade)
+
+The facade ([app/api/facade.py](app/api/facade.py)) picks the engine for each request (strangler pattern):
+
+- `V2_TRAFFIC_PERCENT` (0 to 100, in `.env` or the Cloud Run settings) is the share of requests v2 serves,
+  picked at random per request. `0` sends everything to v1, which is also the rollback. Unset or invalid means 0.
+- The `X-Engine: v1` or `X-Engine: v2` header forces one engine for that request, for tests and the demo.
+- `message` (optional, up to 500 characters) is the person's own words. Only v2 reads it; when v1 answers,
+  `note` says the message was not taken into account.
+- Both engines return the same fields. `call_911`, `note` and `model_usage` are `null` when v1 answers.
+- When v2 falls back to v1, the response says `engine: "v1_fallback"`; the reason is logged with the
+  request id, not returned.
+
+Try it (v2 needs the Vertex AI setup below):
+
+```bash
+curl "http://localhost:8000/v1/recommendations?lat=45.5017&lon=-73.5673&message=my%20son%20has%20a%20high%20fever" -H "X-Engine: v2"
+```
+
+In Swagger UI, `message` and `X-Engine` are fields on the same endpoint.
 
 ## v2 AI agent
 
-v2 takes the same location as v1 plus an optional message in the person's own words:
+v2 takes the same location as v1 plus an optional message in the person's own words. Through the API
+(see [Choosing v1 or v2](#choosing-v1-or-v2-facade)), or from the command line:
 
 ```bash
 python main.py v2 my 6-year-old has a high fever
@@ -97,7 +119,7 @@ sounds life-threatening, and answers in French or English.
 - **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
   data, and an id that was not returned by our services is rejected.
 - **Fallback:** if Gemini fails or gives an invalid answer, the v1 ranking is returned with
-  `engine: "v1_fallback"` and a `fallback_reason`.
+  `engine: "v1_fallback"`. `python main.py v2` also prints a `fallback_reason`; the API logs it instead.
 - **Not deterministic:** the same request can give a different order or wording each time.
 - **Limits per request:** 8 model calls, 2 hospital searches (each search is one Google Routes request),
   30 seconds per model call and 60 seconds in total (each call only gets the time that is left).
