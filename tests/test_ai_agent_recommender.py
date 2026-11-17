@@ -30,11 +30,13 @@ def turn(*calls, prompt_tokens=100, output_tokens=20, thoughts_tokens=5):
     )
 
 
-def submit(*choices, call_911=False, note=None):
+def submit(*choices, call_911=False, note=None, needs=None):
     args = {
         "recommendations": [{"hospital_id": i, "reason": r} for i, r in choices],
         "call_911": call_911,
     }
+    if needs is not None:
+        args["patient_needs"] = needs
     if note is not None:
         args["note"] = note
     return ("submit_recommendations", args)
@@ -166,7 +168,9 @@ def test_unranked_lists_hospitals_that_could_not_be_ranked(services):
 
 def test_agent_can_recommend_a_children_hospital_which_v1_never_does(services):
     client = FakeClient(
-        turn(FIND), turn(STATUS), turn(submit((CHILDREN_ID, "Children's ER."), ("A", "Closest.")))
+        turn(FIND),
+        turn(STATUS),
+        turn(submit((CHILDREN_ID, "Children's ER."), ("A", "Closest."), needs=["children"])),
     )
 
     result = agent.run_agent(45.5, -73.6, "my 6-year-old has a fever", client=client)
@@ -180,7 +184,7 @@ def test_agent_can_recommend_a_children_hospital_which_v1_never_does(services):
 def test_call_911_and_limit(services):
     client = FakeClient(
         turn(FIND),
-        turn(submit(("A", "r"), ("B", "r"), (CHILDREN_ID, "r"), call_911=True)),
+        turn(submit(("A", "r"), ("B", "r"), ("C", "r"), call_911=True, needs=[])),
     )
 
     result = agent.run_agent(45.5, -73.6, "chest pain", limit=2, client=client)
@@ -371,18 +375,38 @@ def test_bad_tool_calls_get_an_error_result(services, call, expected):
         (("submit_recommendations", {"recommendations": ["A"], "call_911": False}), "Unknown"),
         (("submit_recommendations", {"recommendations": []}), "call_911 must be"),
         (("submit_recommendations", {"recommendations": [], "call_911": "no"}), "call_911 must be"),
+        (submit((CHILDREN_ID, "Kids.")), "is a children ER"),  # need not declared
+        (submit((CHILDREN_ID, "Kids."), needs=["cardiology"]), "is a children ER"),
+        (submit(("A", "Closest."), needs=["adults"]), "patient_needs must be a list of"),
+        (submit(("A", "Closest."), needs="children"), "patient_needs must be a list of"),
     ],
     ids=[
         "unknown_id", "no_route", "duplicate", "empty_reason", "empty", "not_list", "not_dict",
-        "missing_911", "bad_911",
+        "missing_911", "bad_911", "specialised_without_need", "specialised_other_need",
+        "unknown_need", "needs_not_list",
     ],
 )
 def test_invalid_answer_is_sent_back_for_correction(services, bad, expected):
     client = FakeClient(turn(FIND), turn(bad), turn(submit(("A", "Closest."))))
 
-    result = agent.run_agent(45.5, -73.6, client=client)
+    result = agent.run_agent(45.5, -73.6, "my back hurts", client=client)
 
     assert expected in client.tool_results(2)["submit_recommendations"]["error"]
+    assert [r["hospital"]["id"] for r in result["recommendations"]] == ["A"]
+
+
+@pytest.mark.parametrize("message", [None, "   "])
+def test_without_a_message_no_specialised_need_is_accepted(services, message):
+    client = FakeClient(
+        turn(FIND),
+        turn(submit((CHILDREN_ID, "Kids."), needs=["children"])),
+        turn(submit(("A", "Closest."), needs=[])),
+    )
+
+    result = agent.run_agent(45.5, -73.6, message, client=client)
+
+    error = client.tool_results(2)["submit_recommendations"]["error"]
+    assert "no message" in error
     assert [r["hospital"]["id"] for r in result["recommendations"]] == ["A"]
 
 
@@ -470,6 +494,7 @@ def test_temporary_gemini_error_is_retried_once(services):
 
     assert len(client.requests) == 3
     assert len(result["recommendations"]) == 1
+    assert result["model_usage"]["model_calls"] == 3  # the failed attempt counts too
 
 
 @pytest.mark.parametrize(
@@ -484,9 +509,10 @@ def test_temporary_gemini_error_is_retried_once(services):
 def test_gemini_errors_that_end_the_run(services, replies, requests_made):
     client = FakeClient(*replies, turn(FIND))
 
-    with pytest.raises(agent.AgentError, match="Gemini request failed"):
+    with pytest.raises(agent.AgentError, match="Gemini request failed") as raised:
         agent.run_agent(45.5, -73.6, client=client)
     assert len(client.requests) == requests_made
+    assert raised.value.model_usage["model_calls"] == requests_made
 
 
 def test_failed_first_hospital_search_ends_the_run(services, monkeypatch):
@@ -521,6 +547,16 @@ def test_failed_second_hospital_search_is_reported_to_the_model(services, monkey
 
     assert "Route request failed" in client.tool_results(2)["find_hospitals"]["error"]
     assert [r["hospital"]["id"] for r in result["recommendations"]] == ["A"]
+
+
+def test_failed_run_keeps_the_usage_so_far(services):
+    client = FakeClient(turn(FIND, prompt_tokens=200), ConnectionError("no network"))
+
+    with pytest.raises(agent.AgentError) as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+
+    usage = raised.value.model_usage
+    assert (usage["model_calls"], usage["tool_calls"], usage["prompt_tokens"]) == (2, 1, 200)
 
 
 def test_client_creation_failure_raises_agent_error(services, monkeypatch):

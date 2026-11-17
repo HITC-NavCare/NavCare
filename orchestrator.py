@@ -70,7 +70,7 @@ def build_agent_recommendations(
             "fallback_reason": str(error),
             "call_911": None,  # the message was not read
             "note": FALLBACK_NOTE if message and message.strip() else None,
-            "model_usage": None,
+            "model_usage": error.model_usage,  # what v2 used before failing, for cost
         })
         return response
 
