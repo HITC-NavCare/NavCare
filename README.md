@@ -93,9 +93,15 @@ children's, mental-health or cardiology ER when the message calls for one, sets 
 sounds life-threatening, and answers in French or English.
 
 - **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
-  (model calls, tool calls and tokens for the request).
+  (model calls, tool calls and tokens for the request). Model calls include retried attempts, and
+  `model_usage` is kept when v2 falls back, so the cost of every v2 request is recorded.
 - **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
   data, and an id that was not returned by our services is rejected.
+- **Specialised ERs are checked too:** the model must say which specialised care the message shows is
+  needed (`children`, `mental_health`, `cardiology` or none). A children's, mental-health or cardiology ER
+  is only accepted for a need it declared, and with no message only general ERs are accepted. The code
+  cannot tell from the text whether the patient is a child; it makes sure the model's choice matches what
+  it declared.
 - **Fallback:** if Gemini fails or gives an invalid answer, the v1 ranking is returned with
   `engine: "v1_fallback"` and a `fallback_reason`.
 - **Not deterministic:** the same request can give a different order or wording each time.

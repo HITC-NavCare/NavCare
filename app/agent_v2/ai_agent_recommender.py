@@ -54,6 +54,7 @@ HOSPITAL_KINDS = {
     "51232130": "cardiology",  # Institut universitaire de cardiologie et de pneumologie de Québec
 }
 GENERAL = "general"
+SPECIALISED_KINDS = ["children", "mental_health", "cardiology"]
 
 SUBMIT_TOOL = "submit_recommendations"
 
@@ -74,6 +75,9 @@ message gives a reason to weigh things differently (for example, they cannot tra
 - Hospital kinds: "general" ERs treat everyone. "children" is only for patients under 18. \
 "mental_health" is only for a mental-health crisis. "cardiology" is only for a heart \
 problem. Never recommend a specialised hospital to someone it does not serve.
+- In patient_needs, list the specialised kinds the person's message shows they need, or \
+none. A specialised hospital can only be recommended when its kind is listed there. With \
+no message, list none and recommend only general ERs.
 - If the message describes something that could be life-threatening (for example chest \
 pain, trouble breathing, signs of a stroke, severe bleeding, loss of consciousness), set \
 call_911 to true and still list the hospitals.
@@ -151,27 +155,43 @@ TOOL_DECLARATIONS = [
                     "type": "boolean",
                     "description": "True if the situation could be life-threatening.",
                 },
+                "patient_needs": {
+                    "type": "array",
+                    "description": (
+                        "Specialised care the person's message shows they need: children "
+                        "(patient under 18), mental_health (mental-health crisis), cardiology "
+                        "(heart problem). Empty when none apply or there is no message."
+                    ),
+                    "items": {"type": "string", "enum": SPECIALISED_KINDS},
+                },
                 "note": {
                     "type": "string",
                     "description": "Optional one or two sentences for the person.",
                 },
             },
-            "required": ["recommendations", "call_911"],
+            "required": ["recommendations", "call_911", "patient_needs"],
         },
     ),
 ]
 
 
 class AgentError(Exception):
-    """The agent could not produce a valid answer (Gemini failed or misbehaved)."""
+    """The agent could not produce a valid answer (Gemini failed or misbehaved).
+
+    model_usage is what the run used before it failed (None if no model call was made),
+    so the cost of a request that fell back to v1 is still recorded.
+    """
+
+    model_usage = None
 
 
 class Toolbox:
     """The tools the model can call for one request. Remembers what was fetched."""
 
-    def __init__(self, user_lat, user_lon):
+    def __init__(self, user_lat, user_lon, has_message=False):
         self.user_lat = user_lat
         self.user_lon = user_lon
+        self.has_message = has_message
         self.hospitals = {}  # id -> hospital from get_candidate_hospitals
         self.er_data = None
         self.weather_now = None
@@ -268,6 +288,13 @@ class Toolbox:
             return None, "recommendations must be a list."
         if not isinstance(args.get("call_911"), bool):
             return None, "call_911 must be true or false."
+        # Checked in code, not left to the prompt: a specialised ER is only accepted for a
+        # need the model declared, and a need can only come from the person's message.
+        needs = args.get("patient_needs", [])
+        if not isinstance(needs, list) or any(need not in SPECIALISED_KINDS for need in needs):
+            return None, "patient_needs must be a list of: " + ", ".join(SPECIALISED_KINDS) + "."
+        if needs and not self.has_message:
+            return None, "There is no message, so patient_needs must be empty."
         reachable = [h for h in self.hospitals.values() if h["travel_time_min"] is not None]
         if not items and reachable:
             return None, "Recommend at least one hospital."
@@ -284,6 +311,12 @@ class Toolbox:
                 return None, f"Hospital {hospital_id} has no road route. Choose another."
             if hospital_id in seen:
                 return None, f"Hospital {hospital_id} is listed twice."
+            kind = HOSPITAL_KINDS.get(hospital_id, GENERAL)
+            if kind != GENERAL and kind not in needs:
+                return None, (
+                    f"Hospital {hospital_id} is a {kind} ER. Recommend it only if "
+                    f"patient_needs includes {kind!r}; otherwise choose a general ER."
+                )
             if not isinstance(reason, str) or not reason.strip():
                 return None, f"Give a reason for hospital {hospital_id}."
             seen.add(hospital_id)
@@ -305,8 +338,11 @@ def make_client():
     )
 
 
-def _generate(client, model, contents, config, deadline):
-    """One Gemini call, retried once on a temporary error, never running past the deadline."""
+def _generate(client, model, contents, config, deadline, usage):
+    """One Gemini call, retried once on a temporary error, never running past the deadline.
+
+    Every attempt is counted in usage["model_calls"], including ones that failed.
+    """
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
@@ -315,6 +351,7 @@ def _generate(client, model, contents, config, deadline):
         timed_config = config.model_copy(update={
             "http_options": types.HttpOptions(timeout=min(REQUEST_TIMEOUT_MS, remaining_ms)),
         })
+        usage["model_calls"] += 1
         try:
             return client.models.generate_content(
                 model=model, contents=contents, config=timed_config
@@ -356,7 +393,7 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
         ),
         thinking_config=types.ThinkingConfig(thinking_level=THINKING_LEVEL),
     )
-    toolbox = Toolbox(user_lat, user_lon)
+    toolbox = Toolbox(user_lat, user_lon, has_message=bool((message or "").strip()))
     contents = [
         types.Content(role="user", parts=[types.Part(text=build_request_text(message, limit))])
     ]
@@ -366,9 +403,18 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
     except Exception as error:  # missing project or credentials
         raise AgentError(f"Gemini client could not be created: {error}") from error
 
+    try:
+        return _run_steps(client, model, contents, config, toolbox, limit, usage)
+    except AgentError as error:
+        error.model_usage = usage
+        raise
+
+
+def _run_steps(client, model, contents, config, toolbox, limit, usage):
+    """The model-and-tools loop of run_agent."""
     deadline = time.monotonic() + MAX_TOTAL_SECONDS
     for _ in range(MAX_MODEL_CALLS):
-        response = _generate(client, model, contents, config, deadline)
+        response = _generate(client, model, contents, config, deadline, usage)
         _count_usage(usage, response)
 
         calls = response.function_calls
@@ -398,7 +444,6 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
 
 def _count_usage(usage, response):
     metadata = response.usage_metadata
-    usage["model_calls"] += 1
     if metadata is None:
         return
     usage["prompt_tokens"] += metadata.prompt_token_count or 0

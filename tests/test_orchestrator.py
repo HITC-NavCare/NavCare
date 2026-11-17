@@ -167,6 +167,22 @@ def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
     assert [r["hospital"]["id"] for r in result["recommendations"]] == ["B"]
 
 
+def test_agent_fallback_keeps_the_model_usage_so_far(fake_services, monkeypatch):
+    usage = {"model": "gemini-test", "model_calls": 2, "tool_calls": 1}
+
+    def failing(*args):
+        error = orchestrator.agent.AgentError("Gemini request failed: 503")
+        error.model_usage = usage
+        raise error
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6)
+
+    assert result["engine"] == "v1_fallback"
+    assert result["model_usage"] == usage
+
+
 @pytest.mark.parametrize("message", [None, "", "   "])
 def test_agent_fallback_has_no_note_without_a_message(fake_services, monkeypatch, message):
     def failing(*args):
