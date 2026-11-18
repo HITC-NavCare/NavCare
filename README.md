@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/health and GET /v1/recommendations?lat=..&lon=... It runs locally and in Docker. Not deployed yet (Cloud Run is next). The v2 agent is not on main yet.
+The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/health and GET /v1/recommendations?lat=..&lon=... It runs locally and in Docker. Not deployed yet (Cloud Run is next). The v2 AI agent runs locally with `python main.py v2` (see [v2 AI agent](#v2-ai-agent)); it is not behind the API yet.
 
 ## Folders
 
@@ -14,7 +14,7 @@ The v1 rule-based recommender is available as a REST API (FastAPI): GET /v1/heal
 app/integrations/    ER-data download script
 app/services/        Routing (Google Routes), weather (Open-Meteo) and live ER status (patient.quebec) clients
 app/recommender_v1/  v1: rule-based ranking
-app/agent_v2/        v2: AI agent
+app/agent_v2/        v2: AI agent (Gemini on Vertex AI chooses the tools to call and the ERs)
 data/                Small sample data files (no personal information)
 deployment/          Google Cloud deployment files
 tests/               Automated tests
@@ -78,6 +78,50 @@ Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments 
 Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
 
 The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) will answer behind the same paths, and the `engine` field in each response says which one answered (`v1` for now).
+
+## v2 AI agent
+
+v2 takes the same location as v1 plus an optional message in the person's own words:
+
+```bash
+python main.py v2 my 6-year-old has a high fever
+```
+
+Gemini (on Vertex AI) decides which of our services to call (nearby hospitals with driving times, live ER
+status, weather), then chooses up to four ERs and writes a reason for each. Unlike v1 it can recommend a
+children's, mental-health or cardiology ER when the message calls for one, sets `call_911` when the message
+sounds life-threatening, and answers in French or English.
+
+- **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
+  (model calls, tool calls and tokens for the request). Model calls include retried attempts, and
+  `model_usage` is kept when v2 falls back, so the cost of every v2 request is recorded.
+- **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
+  data, and an id that was not returned by our services is rejected.
+- **Specialised ERs are checked too:** the model must say which specialised care the message shows is
+  needed (`children`, `mental_health`, `cardiology` or none). A children's, mental-health or cardiology ER
+  is only accepted for a need it declared, and with no message only general ERs are accepted. The code
+  cannot tell from the text whether the patient is a child; it makes sure the model's choice matches what
+  it declared.
+- **Fallback:** if Gemini fails or gives an invalid answer, the v1 ranking is returned with
+  `engine: "v1_fallback"` and a `fallback_reason`.
+- **Not deterministic:** the same request can give a different order or wording each time.
+- **Limits per request:** 8 model calls, 2 hospital searches (each search is one Google Routes request),
+  30 seconds per model call and 60 seconds in total (each call only gets the time that is left).
+  Temporary Gemini errors (429, 500, 503) are retried once.
+- **No hospitals, no answer:** if the first hospital search fails, v2 stops and falls back, instead of
+  returning an empty list as if nothing were nearby.
+- **Fallback note:** when v2 falls back after the person wrote a message, `note` says the message was not read
+  and points to the specialised ERs in `unranked_nearby`.
+
+Setup (once per machine):
+
+1. In the team's Google Cloud project, enable the **Vertex AI API**. Your account needs the *Vertex AI User* role.
+2. Install the [gcloud CLI](https://cloud.google.com/sdk/docs/install) and run
+   `gcloud auth application-default login`. Vertex AI uses this sign-in, not an API key.
+3. In `.env`, set `GOOGLE_CLOUD_PROJECT` to the project id.
+
+Model calls are billed to the project (covered by the trial credit while it lasts). Tests fake Gemini, so they
+cost nothing.
 
 ## Hospital and ER data
 
