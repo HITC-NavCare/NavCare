@@ -102,6 +102,19 @@ curl "http://localhost:8000/v1/recommendations?lat=45.5017&lon=-73.5673&message=
 
 In Swagger UI, `message` and `X-Engine` are fields on the same endpoint.
 
+**Logs for the canary.** Each recommendation request prints one JSON line (Cloud Logging reads it as
+`jsonPayload`), including failed ones:
+
+```json
+{"severity": "INFO", "message": "recommendation", "event": "recommendation", "request_id": "…", "status": 200,
+ "engine": "v2", "chosen_by": "split", "latency_ms": 8421, "model_usage": {"model_calls": 3, "prompt_tokens": 5120, "...": "..."}}
+```
+
+`status` (200, 503 or 500), `latency_ms` and `model_usage` per `engine` give the canary's error rate, p95 latency
+and cost per request. Because the split happens inside the app, Cloud Run's own per-revision charts cannot tell v1
+from v2; the dashboard uses these lines. Fallbacks and errors are the same line at WARNING or ERROR, with the
+real error in `message`.
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words. Through the API

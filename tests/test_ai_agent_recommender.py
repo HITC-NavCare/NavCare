@@ -515,6 +515,19 @@ def test_gemini_errors_that_end_the_run(services, replies, requests_made):
     assert raised.value.model_usage["model_calls"] == requests_made
 
 
+def test_retries_count_towards_the_model_call_limit(services):
+    # A retry on every step would be 16 calls without the shared limit.
+    replies = []
+    for _ in range(agent.MAX_MODEL_CALLS):
+        replies += [api_error(503), turn(STATUS)]
+    client = FakeClient(*replies)
+
+    with pytest.raises(agent.AgentError, match="within 8 model calls") as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+    assert len(client.requests) == agent.MAX_MODEL_CALLS
+    assert raised.value.model_usage["model_calls"] == agent.MAX_MODEL_CALLS
+
+
 def test_failed_first_hospital_search_ends_the_run(services, monkeypatch):
     def failing(lat, lon, radius_km):
         raise RuntimeError("Route request failed: timed out")

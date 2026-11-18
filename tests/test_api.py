@@ -244,3 +244,66 @@ def test_bad_message_or_engine_returns_400(fake_recommendations, fake_agent, par
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_parameter"
     assert fake_recommendations == [] and fake_agent == []
+
+
+# --- the per-request log line (canary metrics) ---------------------------------------
+
+def recommendation_events(caplog):
+    return [r for r in caplog.records if getattr(r, "fields", {}).get("event") == "recommendation"]
+
+
+def test_each_request_logs_one_line_with_engine_latency_and_usage(fake_agent, caplog):
+    caplog.set_level("INFO", logger="navcare")
+    response = client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v2"})
+
+    (event,) = recommendation_events(caplog)
+    assert event.levelname == "INFO"
+    fields = event.fields
+    assert fields["request_id"] == response.headers["X-Request-ID"]
+    assert (fields["status"], fields["engine"], fields["chosen_by"]) == (200, "v2", "header")
+    assert isinstance(fields["latency_ms"], int)
+    assert fields["model_usage"] == V2_RESULT["model_usage"]
+
+
+def test_v1_request_logs_split_and_no_usage(fake_recommendations, caplog):
+    caplog.set_level("INFO", logger="navcare")
+    client.get("/v1/recommendations", params=MONTREAL)
+
+    (event,) = recommendation_events(caplog)
+    assert (event.fields["engine"], event.fields["chosen_by"]) == ("v1", "split")
+    assert event.fields["model_usage"] is None
+
+
+def test_fallback_is_one_warning_line_with_the_reason(monkeypatch, caplog):
+    usage = {"model": "gemini-test", "model_calls": 2}
+    monkeypatch.setattr(orchestrator, "build_agent_recommendations", lambda *a, **k: {
+        **V1_RESULT, "engine": "v1_fallback", "fallback_reason": "Gemini request failed: 503",
+        "model_usage": usage,
+    })
+    client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v2"})
+
+    (event,) = recommendation_events(caplog)
+    assert event.levelname == "WARNING"
+    assert "Gemini request failed: 503" in event.getMessage()
+    assert (event.fields["engine"], event.fields["model_usage"]) == ("v1_fallback", usage)
+
+
+def test_503_and_500_are_logged_with_the_engine_that_failed(monkeypatch, caplog):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("Route request failed: timeout")
+
+    def bug(*args, **kwargs):
+        raise KeyError("occupancyPct")
+
+    monkeypatch.setattr(orchestrator, "build_agent_recommendations", unavailable)
+    monkeypatch.setattr(orchestrator, "build_recommendations", bug)
+    safe_client = TestClient(app, raise_server_exceptions=False)
+    safe_client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v2"})
+    safe_client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v1"})
+
+    first, second = recommendation_events(caplog)
+    assert (first.fields["status"], first.fields["engine"], first.levelname) == (
+        503, "v2", "WARNING")
+    assert (second.fields["status"], second.fields["engine"], second.levelname) == (
+        500, "v1", "ERROR")
+    assert second.exc_info is not None
