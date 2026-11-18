@@ -526,7 +526,11 @@ components:
         call_911:
           type: boolean
           nullable: true
-          description: v2 only. True when the message sounds life-threatening. Null when the message was not read (v1, v1_fallback).
+          description: |
+            True when the message sounds life-threatening: decided by the v2 model, and also
+            set by a code check for clear emergency phrases (English and French), whichever
+            engine answered. That check can only raise the flag, never lower it. With v1 or
+            v1_fallback and no such phrase, null (the rest of the message was not read).
         note:
           type: string
           nullable: true

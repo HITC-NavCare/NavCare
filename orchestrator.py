@@ -1,5 +1,6 @@
 import json
 
+from app import red_flags
 from app.agent_v2 import ai_agent_recommender as agent
 from app.recommender_v1 import rules_based_recommender as recommender
 from app.services.hospital_status_getter import get_er_data
@@ -18,6 +19,13 @@ FALLBACK_NOTE = (
     "The assistant was unavailable, so your message was not taken into account. "
     + _SPECIALISED_HINT
 )
+
+
+def call_911_without_model(message):
+    """call_911 when v1 answers or v2 fell back: True if the message has a clear emergency
+    phrase (app/red_flags.py), otherwise None, because nobody read the rest of the message.
+    """
+    return True if red_flags.mentions_emergency(message) else None
 
 
 def build_recommendations(
@@ -68,7 +76,7 @@ def build_agent_recommendations(
         response.update({
             "engine": "v1_fallback",
             "fallback_reason": str(error),
-            "call_911": None,  # the message was not read
+            "call_911": call_911_without_model(message),  # the model did not read it
             "note": FALLBACK_NOTE if message and message.strip() else None,
             "model_usage": error.model_usage,  # what v2 used before failing, for cost
         })
@@ -78,6 +86,8 @@ def build_agent_recommendations(
         "engine": "v2",
         "origin": {"lat": user_lat, "lon": user_lon},
         **result,
+        # The safety net can raise the model's call_911, never lower it.
+        "call_911": result["call_911"] or red_flags.mentions_emergency(message),
         "disclaimer": DISCLAIMER,
     }
 

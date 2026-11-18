@@ -202,6 +202,15 @@ def test_v1_says_when_it_did_not_read_the_message(fake_recommendations):
     assert without.json()["note"] is None
 
 
+def test_v1_sets_call_911_for_a_clear_emergency_phrase(fake_recommendations):
+    emergency = client.get("/v1/recommendations",
+                           params={**MONTREAL, "message": "chest pain and sweating"})
+    ordinary = client.get("/v1/recommendations", params={**MONTREAL, "message": "fever"})
+
+    assert (emergency.json()["engine"], emergency.json()["call_911"]) == ("v1", True)
+    assert ordinary.json()["call_911"] is None
+
+
 def test_fallback_reason_is_logged_not_returned(monkeypatch, caplog):
     def fallback(*args, **kwargs):
         return {**V1_RESULT, "engine": "v1_fallback",

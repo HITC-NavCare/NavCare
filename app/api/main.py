@@ -141,6 +141,7 @@ def get_recommendations(
             result = {
                 **result,
                 "engine": "v1",
+                "call_911": orchestrator.call_911_without_model(message),
                 "note": orchestrator.MESSAGE_NOT_READ_NOTE if has_message else None,
             }
     except RuntimeError as error:

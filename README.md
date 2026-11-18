@@ -90,7 +90,8 @@ The facade ([app/api/facade.py](app/api/facade.py)) picks the engine for each re
   otherwise anyone could skip the split, including the 0% rollback, and force the costlier v2.
 - `message` (optional, up to 500 characters) is the person's own words. Only v2 reads it; when v1 answers,
   `note` says the message was not taken into account.
-- Both engines return the same fields. `call_911`, `note` and `model_usage` are `null` when v1 answers.
+- Both engines return the same fields. `note` and `model_usage` are `null` when v1 answers; `call_911` is too,
+  unless the message has a clear emergency phrase (see the safety net below).
 - When v2 falls back to v1, the response says `engine: "v1_fallback"`; the reason is logged with the
   request id, not returned.
 
@@ -129,6 +130,10 @@ status, weather), then chooses up to four ERs and writes a reason for each. Unli
 children's, mental-health or cardiology ER when the message calls for one, sets `call_911` when the message
 sounds life-threatening, and answers in French or English.
 
+- **911 safety net:** besides the model, our code looks for clear emergency phrases in English and French
+  ("chest pain", "can't breathe", "AVC", "ne respire plus"…, in [app/red_flags.py](app/red_flags.py)). A match sets
+  `call_911` to `true` whichever engine answered; it can raise the model's answer, never lower it. It matches
+  phrases, not meaning: it misses other wordings (the model covers those) and also flags "no chest pain".
 - **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
   (model calls, tool calls and tokens for the request). Model calls include retried attempts, and
   `model_usage` is kept when v2 falls back, so the cost of every v2 request is recorded.
