@@ -14,9 +14,9 @@ info:
 
     `GET /v1/recommendations` is served by one of two implementations
     (v1 rules engine or v2 AI agent), chosen for each request by a facade:
-    the canary split (`V2_TRAFFIC_PERCENT`), or the `X-Engine` header when
-    present. Both return the same schema; the `engine` field says which
-    one answered.
+    the canary split (`V2_TRAFFIC_PERCENT`), or the `X-Engine` header where
+    it is enabled (testing and demo only, not production). Both return the
+    same schema; the `engine` field says which one answered.
   contact:
     name: NAVCare team (COEN 424 / COEN 6313, Fall 2026)
     url: https://github.com/HITC-NavCare
@@ -82,7 +82,10 @@ paths:
             maxLength: 500
         - name: X-Engine
           in: header
-          description: Force one engine for this request (tests and demo). Without it, the canary split decides.
+          description: |
+            Force one engine for this request (tests and demo). Only honoured
+            where the server sets ENGINE_HEADER_ENABLED=true; in production it
+            is ignored and the canary split decides.
           schema:
             type: string
             enum: [v1, v2]
@@ -499,7 +502,12 @@ components:
           $ref: '#/components/schemas/HospitalSummary'
         cause:
           type: string
-          enum: [no_current_data, stale_data]
+          enum: [no_current_data, stale_data, specialised, no_route]
+          description: |
+            no_current_data: MSSS publishes no current data for this ER.
+            stale_data: MSSS has stopped publishing new data.
+            specialised: a children's, mental-health or cardiology ER not chosen for this person.
+            no_route: no road route was found.
 
     RecommendationResponse:
       type: object
@@ -541,7 +549,8 @@ components:
         data_updated_at:
           type: string
           format: date-time
-          description: Time of the MSSS snapshot used.
+          nullable: true
+          description: Time of the MSSS snapshot used. Null when v2 answered without checking ER status.
         origin:
           type: object
           required: [lat, lon]

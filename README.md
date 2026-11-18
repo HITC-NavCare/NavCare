@@ -86,6 +86,8 @@ The facade ([app/api/facade.py](app/api/facade.py)) picks the engine for each re
 - `V2_TRAFFIC_PERCENT` (0 to 100, in `.env` or the Cloud Run settings) is the share of requests v2 serves,
   picked at random per request. `0` sends everything to v1, which is also the rollback. Unset or invalid means 0.
 - The `X-Engine: v1` or `X-Engine: v2` header forces one engine for that request, for tests and the demo.
+  It only works where `ENGINE_HEADER_ENABLED=true` (as in `.env.example`). Leave it off in production:
+  otherwise anyone could skip the split, including the 0% rollback, and force the costlier v2.
 - `message` (optional, up to 500 characters) is the person's own words. Only v2 reads it; when v1 answers,
   `note` says the message was not taken into account.
 - Both engines return the same fields. `call_911`, `note` and `model_usage` are `null` when v1 answers.

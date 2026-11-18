@@ -96,8 +96,8 @@ def get_recommendations(
         "Only v2 reads it.",
     ),
     x_engine: Literal["v1", "v2"] | None = Header(
-        default=None, description="Force one engine (tests and demo). "
-        "Without it, the canary split decides.",
+        default=None, description="Force one engine (tests and demo). Only honoured where "
+        "ENGINE_HEADER_ENABLED=true; otherwise, and without it, the canary split decides.",
     ),
 ):
     request_id = request.state.request_id

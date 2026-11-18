@@ -20,8 +20,9 @@ V2_RESULT = {
 
 @pytest.fixture(autouse=True)
 def all_traffic_to_v1(monkeypatch):
-    # A local .env may set the split; tests that need another value set it themselves.
+    # A local .env may set these; tests that need other values set them themselves.
     monkeypatch.setenv(facade.V2_TRAFFIC_ENV_VAR, "0")
+    monkeypatch.setenv(facade.HEADER_ENABLED_ENV_VAR, "true")
 
 
 @pytest.fixture
@@ -171,6 +172,16 @@ def test_header_forces_v1_even_at_100(monkeypatch, fake_recommendations, fake_ag
     response = client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v1"})
 
     assert response.json()["engine"] == "v1"
+    assert fake_agent == []
+
+
+def test_header_is_ignored_unless_enabled(monkeypatch, fake_recommendations, fake_agent):
+    monkeypatch.delenv(facade.HEADER_ENABLED_ENV_VAR)
+
+    response = client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v2"})
+
+    assert response.status_code == 200
+    assert response.json()["engine"] == "v1"  # the 0% split still holds
     assert fake_agent == []
 
 

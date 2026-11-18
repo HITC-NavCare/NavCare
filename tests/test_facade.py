@@ -4,9 +4,10 @@ from app.api import facade
 
 
 @pytest.fixture(autouse=True)
-def no_split_setting(monkeypatch):
-    # A local .env or shell may set it; each test sets its own value.
+def no_settings(monkeypatch):
+    # A local .env or shell may set these; each test sets its own values.
     monkeypatch.delenv(facade.V2_TRAFFIC_ENV_VAR, raising=False)
+    monkeypatch.delenv(facade.HEADER_ENABLED_ENV_VAR, raising=False)
 
 
 def set_percent(monkeypatch, value):
@@ -36,10 +37,28 @@ def test_split_sends_the_configured_share_to_v2(monkeypatch, percent, draw, engi
 
 @pytest.mark.parametrize("percent", ["0", "100"])
 @pytest.mark.parametrize("forced", ["v1", "v2"])
-def test_header_overrides_the_split(monkeypatch, percent, forced):
+def test_enabled_header_overrides_the_split(monkeypatch, percent, forced):
     set_percent(monkeypatch, percent)
+    monkeypatch.setenv(facade.HEADER_ENABLED_ENV_VAR, "true")
 
     assert facade.choose_engine(forced, draw=lambda: 0.5) == (forced, "header")
+
+
+@pytest.mark.parametrize("enabled", [None, "", "false", "0", "yes please"])
+def test_header_is_ignored_unless_enabled(monkeypatch, enabled):
+    set_percent(monkeypatch, "0")
+    if enabled is not None:
+        monkeypatch.setenv(facade.HEADER_ENABLED_ENV_VAR, enabled)
+
+    # At 0% nobody gets v2, whatever the caller sends: the rollback holds.
+    assert facade.choose_engine("v2", draw=lambda: 0.0) == ("v1", "split")
+
+
+@pytest.mark.parametrize("enabled", ["true", "TRUE", " 1 "])
+def test_header_enabled_values(monkeypatch, enabled):
+    monkeypatch.setenv(facade.HEADER_ENABLED_ENV_VAR, enabled)
+
+    assert facade.engine_header_enabled() is True
 
 
 @pytest.mark.parametrize("value", ["abc", "-5", "150", "nan"])
