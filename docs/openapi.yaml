@@ -13,9 +13,10 @@ info:
     hourly snapshots to compute historical occupancy patterns.
 
     `GET /v1/recommendations` is served by one of two implementations
-    (v1 rules engine or v2 AI agent) chosen by a canary traffic split.
-    Both return exactly the same schema; responses never reveal which
-    version answered.
+    (v1 rules engine or v2 AI agent), chosen for each request by a facade:
+    the canary split (`V2_TRAFFIC_PERCENT`), or the `X-Engine` header where
+    it is enabled (testing and demo only, not production). Both return the
+    same schema; the `engine` field says which one answered.
   contact:
     name: NAVCare team (COEN 424 / COEN 6313, Fall 2026)
     url: https://github.com/HITC-NavCare
@@ -70,6 +71,24 @@ paths:
             type: boolean
             default: false
         - $ref: '#/components/parameters/Lang'
+        - name: message
+          in: query
+          description: |
+            Optional, in the person's own words (French or English), for
+            example "my 6-year-old has a high fever". Only v2 reads it; when v1
+            answers, `note` says the message was not taken into account.
+          schema:
+            type: string
+            maxLength: 500
+        - name: X-Engine
+          in: header
+          description: |
+            Force one engine for this request (tests and demo). Only honoured
+            where the server sets ENGINE_HEADER_ENABLED=true; in production it
+            is ignored and the canary split decides.
+          schema:
+            type: string
+            enum: [v1, v2]
       responses:
         '200':
           description: Ranked recommendations
@@ -85,6 +104,10 @@ paths:
               example:
                 request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
                 requested_at: '2026-10-22T14:05:12-04:00'
+                engine: v1
+                call_911: null
+                note: null
+                model_usage: null
                 data_updated_at: '2026-10-22T14:00:00-04:00'
                 origin: { lat: 45.497, lon: -73.579 }
                 radius_km: 50
@@ -479,11 +502,16 @@ components:
           $ref: '#/components/schemas/HospitalSummary'
         cause:
           type: string
-          enum: [no_current_data, stale_data]
+          enum: [no_current_data, stale_data, specialised, no_route]
+          description: |
+            no_current_data: MSSS publishes no current data for this ER.
+            stale_data: MSSS has stopped publishing new data.
+            specialised: a children's, mental-health or cardiology ER not chosen for this person.
+            no_route: no road route was found.
 
     RecommendationResponse:
       type: object
-      required: [request_id, requested_at, data_updated_at, origin, recommendations, disclaimer]
+      required: [request_id, requested_at, engine, data_updated_at, origin, recommendations, disclaimer]
       properties:
         request_id:
           type: string
@@ -491,10 +519,42 @@ components:
         requested_at:
           type: string
           format: date-time
+        engine:
+          type: string
+          enum: [v1, v2, v1_fallback]
+          description: Which engine answered. v1_fallback means v2 failed and v1's ranking was returned.
+        call_911:
+          type: boolean
+          nullable: true
+          description: |
+            True when the message sounds life-threatening: decided by the v2 model, and also
+            set by a code check for clear emergency phrases (English and French), whichever
+            engine answered. That check can only raise the flag, never lower it. With v1 or
+            v1_fallback and no such phrase, null (the rest of the message was not read).
+        note:
+          type: string
+          nullable: true
+          description: Optional advice for the person, or a notice that their message was not read.
+        model_usage:
+          type: object
+          nullable: true
+          description: v2 only. Model calls, tool calls and tokens used for this request (for cost per request).
+          properties:
+            model:
+              type: string
+            model_calls:
+              type: integer
+            tool_calls:
+              type: integer
+            prompt_tokens:
+              type: integer
+            output_tokens:
+              type: integer
         data_updated_at:
           type: string
           format: date-time
-          description: Time of the MSSS snapshot used.
+          nullable: true
+          description: Time of the MSSS snapshot used. Null when v2 answered without checking ER status.
         origin:
           type: object
           required: [lat, lon]

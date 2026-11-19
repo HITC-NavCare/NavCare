@@ -515,6 +515,19 @@ def test_gemini_errors_that_end_the_run(services, replies, requests_made):
     assert raised.value.model_usage["model_calls"] == requests_made
 
 
+def test_retries_count_towards_the_model_call_limit(services):
+    # A retry on every step would be 16 calls without the shared limit.
+    replies = []
+    for _ in range(agent.MAX_MODEL_CALLS):
+        replies += [api_error(503), turn(STATUS)]
+    client = FakeClient(*replies)
+
+    with pytest.raises(agent.AgentError, match="within 8 model calls") as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+    assert len(client.requests) == agent.MAX_MODEL_CALLS
+    assert raised.value.model_usage["model_calls"] == agent.MAX_MODEL_CALLS
+
+
 def test_failed_first_hospital_search_ends_the_run(services, monkeypatch):
     def failing(lat, lon, radius_km):
         raise RuntimeError("Route request failed: timed out")
@@ -557,6 +570,21 @@ def test_failed_run_keeps_the_usage_so_far(services):
 
     usage = raised.value.model_usage
     assert (usage["model_calls"], usage["tool_calls"], usage["prompt_tokens"]) == (2, 1, 200)
+
+
+def test_unexpected_error_keeps_the_usage_so_far(services, monkeypatch):
+    # A bug (not an AgentError) still carries the usage, so the fallback can record the cost.
+    def broken_weather(lat, lon):
+        raise KeyError("temperature")
+
+    monkeypatch.setattr(agent, "get_weather_data", broken_weather)
+    client = FakeClient(turn(FIND, prompt_tokens=200), turn(WEATHER, prompt_tokens=300))
+
+    with pytest.raises(KeyError) as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+
+    usage = raised.value.model_usage
+    assert (usage["model_calls"], usage["tool_calls"], usage["prompt_tokens"]) == (2, 2, 500)
 
 
 def test_client_creation_failure_raises_agent_error(services, monkeypatch):

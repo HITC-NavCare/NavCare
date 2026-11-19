@@ -37,7 +37,7 @@ RETRY_STATUS_CODES = [429, 500, 503]
 THINKING_LEVEL = "LOW"
 
 # Limits that keep one request's cost and time bounded.
-MAX_MODEL_CALLS = 8
+MAX_MODEL_CALLS = 8  # every Gemini attempt of one request, retries included
 MAX_TOTAL_SECONDS = 60  # for all Gemini calls of one request; after this, v1 is used
 MAX_ROUTE_SEARCHES = 2  # each search is one Google Routes request (up to 15 billed elements)
 MAX_RADIUS_KM = 150
@@ -341,9 +341,12 @@ def make_client():
 def _generate(client, model, contents, config, deadline, usage):
     """One Gemini call, retried once on a temporary error, never running past the deadline.
 
-    Every attempt is counted in usage["model_calls"], including ones that failed.
+    Every attempt is counted in usage["model_calls"], including ones that failed, and
+    retries count towards MAX_MODEL_CALLS too, so a request never makes more than that.
     """
     for attempt in range(1, RETRY_ATTEMPTS + 1):
+        if usage["model_calls"] >= MAX_MODEL_CALLS:
+            raise AgentError(f"Gemini did not finish within {MAX_MODEL_CALLS} model calls")
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             raise AgentError(f"Gemini did not finish within {MAX_TOTAL_SECONDS} seconds")
@@ -405,8 +408,8 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
 
     try:
         return _run_steps(client, model, contents, config, toolbox, limit, usage)
-    except AgentError as error:
-        error.model_usage = usage
+    except Exception as error:  # an AgentError, or a bug the caller falls back from
+        error.model_usage = usage  # so the cost of a request that fell back is still recorded
         raise
 
 

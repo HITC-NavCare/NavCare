@@ -147,6 +147,39 @@ def test_agent_response_has_every_v1_field(fake_services, monkeypatch):
     assert set(v1) <= set(v2)
 
 
+def test_safety_net_raises_call_911_when_the_model_did_not(monkeypatch):
+    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, "chest pain since an hour")
+
+    assert AGENT_RESULT["call_911"] is False
+    assert result["call_911"] is True
+
+
+def test_safety_net_never_lowers_call_911(monkeypatch):
+    monkeypatch.setattr(orchestrator.agent, "run_agent",
+                        lambda *args: {**AGENT_RESULT, "call_911": True})
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, "my wrist hurts a lot")
+
+    assert result["call_911"] is True
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"), [("il ne respire plus", True), ("fever", None), (None, None)]
+)
+def test_fallback_call_911_comes_from_the_safety_net(fake_services, monkeypatch, message,
+                                                      expected):
+    def failing(*args):
+        raise orchestrator.agent.AgentError("Gemini request failed: 503")
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, message)
+
+    assert result["call_911"] is expected
+
+
 def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
     def failing(*args):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
@@ -167,6 +200,17 @@ def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
     assert [r["hospital"]["id"] for r in result["recommendations"]] == ["B"]
 
 
+def test_agent_fallback_uses_the_requested_radius(fake_services, monkeypatch):
+    def failing(*args):
+        raise orchestrator.agent.AgentError("Gemini request failed: 503")
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, radius_km=20)
+
+    assert result["radius_km"] == 20
+
+
 def test_agent_fallback_keeps_the_model_usage_so_far(fake_services, monkeypatch):
     usage = {"model": "gemini-test", "model_calls": 2, "tool_calls": 1}
 
@@ -181,6 +225,40 @@ def test_agent_fallback_keeps_the_model_usage_so_far(fake_services, monkeypatch)
 
     assert result["engine"] == "v1_fallback"
     assert result["model_usage"] == usage
+
+
+@pytest.mark.parametrize("bug", [KeyError("hospital"), TypeError("bad args"), RuntimeError("x")])
+def test_unexpected_agent_error_falls_back_to_v1(fake_services, monkeypatch, caplog, bug):
+    # A bug in v2 must not leave the person without a hospital list.
+    def failing(*args):
+        bug.model_usage = {"model": "gemini-test", "model_calls": 1, "tool_calls": 0}
+        raise bug
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6, "il ne respire plus")
+
+    assert result["engine"] == "v1_fallback"
+    assert result["fallback_reason"].startswith(f"unexpected {type(bug).__name__} in v2: ")
+    assert [r["hospital"]["id"] for r in result["recommendations"]]
+    assert result["call_911"] is True  # the safety net still works
+    assert result["note"] == orchestrator.FALLBACK_NOTE
+    assert result["model_usage"]["model_calls"] == 1
+    # The bug's stack trace is logged, so it is not hidden by the fallback.
+    [record] = [r for r in caplog.records if r.name == "navcare.orchestrator"]
+    assert record.exc_info[1] is bug
+
+
+def test_unexpected_agent_error_without_usage_still_falls_back(fake_services, monkeypatch):
+    def failing(*args):
+        raise ValueError("no usage attached")
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
+
+    result = orchestrator.build_agent_recommendations(45.5, -73.6)
+
+    assert result["engine"] == "v1_fallback"
+    assert result["model_usage"] is None
 
 
 @pytest.mark.parametrize("message", [None, "", "   "])
