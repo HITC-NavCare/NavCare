@@ -408,8 +408,8 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
 
     try:
         return _run_steps(client, model, contents, config, toolbox, limit, usage)
-    except AgentError as error:
-        error.model_usage = usage
+    except Exception as error:  # an AgentError, or a bug the caller falls back from
+        error.model_usage = usage  # so the cost of a request that fell back is still recorded
         raise
 
 

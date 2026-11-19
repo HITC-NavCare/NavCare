@@ -297,6 +297,21 @@ def test_fallback_is_one_warning_line_with_the_reason(monkeypatch, caplog):
     assert (event.fields["engine"], event.fields["model_usage"]) == ("v1_fallback", usage)
 
 
+def test_bug_in_v2_gives_the_v1_list_not_a_500(monkeypatch, caplog):
+    def broken_agent(*args, **kwargs):
+        raise KeyError("x")
+
+    monkeypatch.setattr(orchestrator.agent, "run_agent", broken_agent)
+    monkeypatch.setattr(orchestrator, "build_recommendations", lambda *a, **k: dict(V1_RESULT))
+    response = client.get("/v1/recommendations", params=MONTREAL, headers={"X-Engine": "v2"})
+
+    assert response.status_code == 200
+    assert response.json()["engine"] == "v1_fallback"
+    (event,) = recommendation_events(caplog)
+    assert (event.levelname, event.fields["status"]) == ("WARNING", 200)
+    assert "unexpected KeyError in v2" in event.getMessage()
+
+
 def test_503_and_500_are_logged_with_the_engine_that_failed(monkeypatch, caplog):
     def unavailable(*args, **kwargs):
         raise RuntimeError("Route request failed: timeout")

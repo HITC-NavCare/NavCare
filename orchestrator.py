@@ -1,4 +1,5 @@
 import json
+import logging
 
 from app import red_flags
 from app.agent_v2 import ai_agent_recommender as agent
@@ -8,6 +9,7 @@ from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM, get_candidat
 from app.services.weather_getter import get_weather_data
 
 DISCLAIMER = "Not for life-threatening emergencies. Call 911."
+logger = logging.getLogger("navcare.orchestrator")
 # v1 cannot read the person's message. These notes say so when v1 answers a request that
 # had one: MESSAGE_NOT_READ_NOTE when the facade chose v1, FALLBACK_NOTE when v2 failed.
 _SPECIALISED_HINT = (
@@ -66,19 +68,27 @@ def build_agent_recommendations(
 
     Returns a dict with the v1 fields plus engine, call_911, note and model_usage. If Gemini
     fails or gives an invalid answer, the v1 ranking is returned instead, marked as a fallback.
+    The same happens on any unexpected error in v2 (a bug): a person still gets a hospital
+    list instead of a 500, and the error's stack trace is logged.
     radius_km is only used by that fallback; the agent chooses its own search radius.
     Raises RuntimeError if the fallback's data services fail too.
     """
     try:
         result = agent.run_agent(user_lat, user_lon, message, limit)
-    except agent.AgentError as error:
+    except Exception as error:
+        if isinstance(error, agent.AgentError):
+            reason = str(error)
+        else:
+            reason = f"unexpected {type(error).__name__} in v2: {error}"
+            logger.error("v2 failed unexpectedly; v1 answers instead", exc_info=error)
         response = build_recommendations(user_lat, user_lon, limit=limit, radius_km=radius_km)
         response.update({
             "engine": "v1_fallback",
-            "fallback_reason": str(error),
+            "fallback_reason": reason,
             "call_911": call_911_without_model(message),  # the model did not read it
             "note": FALLBACK_NOTE if message and message.strip() else None,
-            "model_usage": error.model_usage,  # what v2 used before failing, for cost
+            # What v2 used before failing, for cost. run_agent adds it to any error it raises.
+            "model_usage": getattr(error, "model_usage", None),
         })
         return response
 

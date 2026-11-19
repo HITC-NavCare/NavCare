@@ -13,7 +13,10 @@ import re
 import unicodedata
 
 # English and French, written without accents and in lower case (messages are normalised the
-# same way). Same situations as the "life-threatening" list in the v2 system instruction.
+# same way). Same situations as the "life-threatening" list in the v2 system instruction,
+# plus collapse and severe allergic reactions. The whole pattern must end at a word boundary,
+# so a pattern that should also match other endings (French feminine and plural, English
+# -s, -ed, -ing) says so with \w* or an optional ending.
 EMERGENCY_PATTERNS = [
     # chest pain
     r"chest pains?", r"pain in (my|his|her|the) chest", r"douleurs? (a la |dans la )?poitrine",
@@ -21,18 +24,21 @@ EMERGENCY_PATTERNS = [
     # breathing
     r"(can ?not|can't|cant|unable to) breathe?", r"(trouble|difficulty|problems?) breathing",
     r"hard to breathe", r"short(ness)? of breath", r"not breathing", r"stopped breathing",
-    r"(difficulte|mal) a respirer", r"(ne|n') ?respire (plus|pas)", r"essouffle",
+    r"(difficulte|mal) a respirer", r"(ne|n') ?respire (plus|pas)", r"essouffle\w*",
     r"choking", r"s'etouffe",
     # stroke
     r"stroke", r"avc", r"face (is )?drooping", r"slurred speech",
     # bleeding
     r"(severe|heavy|heavily|lots of|a lot of) bleed(ing)?", r"bleeding (heavily|a lot)",
-    r"won't stop bleeding", r"saigne (beaucoup|abondamment)", r"saignement (abondant|important)",
-    r"hemorragie",
-    # consciousness, seizures, poisoning
-    r"unconscious", r"unresponsive", r"passed out", r"fainted", r"inconscient",
-    r"perte de conscience", r"(s'est )?evanoui", r"seizure", r"convulsions?", r"overdose",
-    r"surdose",
+    r"(won'?t|doesn'?t|can'?t) stop bleeding", r"saigne (beaucoup|abondamment)",
+    r"saignement (abondant|important)", r"hemorragie",
+    # consciousness, collapse, seizures, poisoning
+    r"unconscious", r"unresponsive", r"passed out", r"faint(ed|ing)", r"inconscient\w*",
+    r"perte de conscience", r"evanoui\w*", r"collapsed", r"s'est effondre\w*",
+    r"seiz(ures?|ing)", r"convuls\w*", r"overdos\w*", r"surdose\w*",
+    # severe allergic reaction
+    r"anaphyla\w*", r"(severe|serious|bad) allergic reaction",
+    r"reaction allergique (grave|severe|importante)", r"throat (is )?(swelling|closing)",
     # self-harm
     r"suicid\w*", r"kill (myself|himself|herself)", r"me tuer",
 ]
