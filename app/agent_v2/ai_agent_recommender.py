@@ -376,11 +376,13 @@ def build_request_text(message, limit):
     return text + f"Their message, between the markers:\n<<<\n{message}\n>>>"
 
 
-def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT, client=None):
+def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT, client=None,
+              started=None):
     """Let Gemini look up the data and choose ERs for a location and an optional message.
 
     Returns a dict with the same recommendation fields as v1, plus call_911, note and
     model_usage. Raises AgentError if Gemini fails or does not give a valid answer.
+    started: time.monotonic() when the MAX_TOTAL_SECONDS limit began (default: now).
     """
     model = os.environ.get(MODEL_ENV_VAR, DEFAULT_MODEL)
     usage = {
@@ -407,15 +409,15 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
         raise AgentError(f"Gemini client could not be created: {error}") from error
 
     try:
-        return _run_steps(client, model, contents, config, toolbox, limit, usage)
+        return _run_steps(client, model, contents, config, toolbox, limit, usage, started)
     except Exception as error:  # an AgentError, or a bug the caller falls back from
         error.model_usage = usage  # so the cost of a request that fell back is still recorded
         raise
 
 
-def _run_steps(client, model, contents, config, toolbox, limit, usage):
+def _run_steps(client, model, contents, config, toolbox, limit, usage, started=None):
     """The model-and-tools loop of run_agent."""
-    deadline = time.monotonic() + MAX_TOTAL_SECONDS
+    deadline = (time.monotonic() if started is None else started) + MAX_TOTAL_SECONDS
     for _ in range(MAX_MODEL_CALLS):
         response = _generate(client, model, contents, config, deadline, usage)
         _count_usage(usage, response)
