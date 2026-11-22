@@ -106,6 +106,10 @@ def test_correct_v1_and_v2_responses_have_no_problems():
     (lambda r: r.pop("radius_km"), "v1 response has no radius_km"),
     (lambda r: r.update(request_id="abc"), "schema: request_id: 'abc' is not a 'uuid'"),
     (lambda r: r.update(requested_at="yesterday"), "schema: requested_at: 'yesterday' is not"),
+    (lambda r: r.pop("call_911"), "'call_911' is a required property"),
+    (lambda r: r.pop("model_usage"), "'model_usage' is a required property"),
+    (lambda r: r["recommendations"][0].pop("avg_ambulatory_stay_hours"),
+     "'avg_ambulatory_stay_hours' is a required property"),
     (lambda r: r["origin"].update(lat=46.8), "is not the requested location"),
     (lambda r: r["recommendations"][1].update(hospital=summary(CHILDREN_ID)),
      "v1 recommended specialised ER 51222800"),
@@ -312,8 +316,9 @@ ERROR_BODY = {"error": {"code": "data_unavailable", "message": "Try again.",
 
 def test_records_that_are_not_200_are_not_checked():
     result = correctness.check_record({"request": REQUEST, "status": 503, "response": {}})
-    assert result == {"engine": "unknown", "status": 503, "correct": None, "problems": [],
-                      "bad": False, "v1_comparison_skipped": False}
+    assert result == {"engine": "unknown", "forced_engine": None, "status": 503,
+                      "correct": None, "problems": [], "bad": False,
+                      "v1_comparison_skipped": False}
 
 
 def test_non_200_is_counted_under_the_engine_the_load_test_forced():
@@ -353,6 +358,10 @@ def test_an_engine_that_is_not_a_name_does_not_break_the_summary(engine):
      "bad record: status 'OK' is not an HTTP status code"),
     ({"request": REQUEST, "response": response()},
      "bad record: status None is not an HTTP status code"),
+    ({"request": REQUEST, "status": "²", "response": response()},
+     "bad record: status '²' is not an HTTP status code"),
+    ({"request": REQUEST, "status": 2000, "response": response()},
+     "bad record: status 2000 is not an HTTP status code"),
 ])
 def test_records_that_cannot_be_checked_are_bad(record, expected):
     result = correctness.check_record(record)
@@ -430,6 +439,43 @@ def test_command_line_goes_on_after_a_line_that_is_not_json(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "v1: 1/1 correct (100.0%)" in output
     assert "line 2: not checked: bad record: not valid JSON" in output
+
+
+def test_command_line_goes_on_after_a_line_that_is_not_utf8(tmp_path, capsys):
+    path = tmp_path / "results.jsonl"
+    good = json.dumps({"request": REQUEST, "status": 200, "response": response("v1")})
+    path.write_bytes(good.encode() + b"\n\xff\xfe\n")
+    assert correctness.main([str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "v1: 1/1 correct (100.0%)" in output
+    assert "line 2: not checked: bad record: not valid UTF-8" in output
+
+
+def test_command_line_fails_when_v2_always_fell_back(tmp_path, capsys):
+    path = write_results(tmp_path, [
+        {"request": REQUEST, "status": 200, "response": response("v1_fallback"), "engine": "v2"},
+    ])
+    assert correctness.main([path]) == 1
+    output = capsys.readouterr().out
+    assert "v1_fallback: 1/1 correct (100.0%)" in output
+    assert "v2: 0/0 correct (n/a), 0 non-200 not checked" in output
+    assert "No 200 responses to check for: v2" in output
+
+
+@pytest.mark.parametrize("lines", [
+    [],
+    [{"request": REQUEST, "status": 503, "response": ERROR_BODY}],
+])
+def test_command_line_fails_when_nothing_was_checked(tmp_path, capsys, lines):
+    assert correctness.main([write_results(tmp_path, lines)]) == 1
+    assert "No 200 responses from v1 or v2 were checked" in capsys.readouterr().out
+
+
+def test_command_line_rejects_a_negative_show(tmp_path):
+    path = write_results(tmp_path, [{"request": REQUEST, "status": 200, "response": response()}])
+    with pytest.raises(SystemExit):
+        correctness.main([path, "--show", "-1"])
+    assert correctness.main([path, "--show", "0"]) == 0
 
 
 def test_command_line_cannot_open_the_file(tmp_path, capsys):

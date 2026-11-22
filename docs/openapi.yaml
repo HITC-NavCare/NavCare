@@ -479,7 +479,8 @@ components:
         The ER numbers (estimated_wait_minutes to avg_ambulatory_stay_hours) are null only
         when v2 recommended an ER that has no current ER data. v1 never ranks such an ER.
       required: [rank, hospital, travel_minutes, distance_km, estimated_wait_minutes,
-                 expected_minutes, occupancy_rate, reason]
+                 expected_minutes, occupancy_rate, patients_waiting, patients_over_24h,
+                 avg_ambulatory_stay_hours, reason]
       properties:
         rank:
           type: integer
@@ -539,7 +540,8 @@ components:
 
     RecommendationResponse:
       type: object
-      required: [request_id, requested_at, engine, data_updated_at, origin, recommendations, disclaimer]
+      required: [request_id, requested_at, engine, call_911, note, model_usage, data_updated_at,
+                 origin, recommendations, disclaimer]
       properties:
         request_id:
           type: string
