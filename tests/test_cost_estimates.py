@@ -44,19 +44,53 @@ def test_recorded_zero_tokens_cost_zero_for_a_priced_model():
     assert estimate(ZERO)["estimated_usd"] == 0
 
 
-def test_no_production_prices_so_the_real_model_is_unknown():
-    assert costs.GEMINI_PRICES == ()
-    usage = {**USAGE, "model": agent.DEFAULT_MODEL}
+REAL = {**USAGE, "model": agent.DEFAULT_MODEL}  # the agent's default model
 
-    result = costs.estimate_gemini_cost(usage, agent.DEFAULT_LOCATION, DAY)
+
+def real_estimate(on, location=agent.DEFAULT_LOCATION, usage=REAL):
+    return costs.estimate_gemini_cost(usage, location, on)
+
+
+@pytest.mark.parametrize(("on", "expected"), [
+    # 10,000 input and 2,000 output tokens, Vertex AI Standard, global
+    (date(2026, 11, 22), 10_000 * 0.75 / 1e6 + 2_000 * 3.75 / 1e6),  # first checked day
+    (date(2026, 12, 31), 10_000 * 0.75 / 1e6 + 2_000 * 3.75 / 1e6),  # last introductory day
+    (date(2027, 1, 1), 10_000 * 1.50 / 1e6 + 2_000 * 7.50 / 1e6),  # standard price starts
+    (date(2028, 6, 1), 10_000 * 1.50 / 1e6 + 2_000 * 7.50 / 1e6),
+])
+def test_verified_gemini_3_8_flash_prices(on, expected):
+    result = real_estimate(on)
+
+    assert result["estimated_usd"] == pytest.approx(expected)
+    assert result["price"]["source"] == costs.VERTEX_PRICING_URL
+
+
+def test_dates_before_the_checked_price_are_unknown():
+    result = real_estimate(date(2026, 11, 21))
 
     assert result["estimated_usd"] is None
     assert result["unknown_reason"].startswith("no known price for model")
 
 
-def test_any_production_row_names_its_source_and_check_date():
+@pytest.mark.parametrize("location", ["us", "eu", "northamerica-northeast1"])
+def test_regional_locations_are_unknown(location):
+    assert real_estimate(date(2026, 11, 22), location)["estimated_usd"] is None
+
+
+def test_other_real_models_are_unknown():
+    usage = {**REAL, "model": "gemini-3.7-flash"}
+
+    assert real_estimate(date(2026, 11, 22), usage=usage)["estimated_usd"] is None
+
+
+def test_production_rows_name_their_source_and_do_not_overlap():
     for price in costs.GEMINI_PRICES:
-        assert price["source"] and isinstance(price["checked_on"], date)
+        assert price["source"] == costs.VERTEX_PRICING_URL
+        assert isinstance(price["checked_on"], date)
+    rows = sorted(costs.GEMINI_PRICES, key=lambda p: p["from"])
+    for earlier, later in zip(rows, rows[1:]):
+        if (earlier["model"], earlier["location"]) == (later["model"], later["location"]):
+            assert earlier["until"] < later["from"]
 
 
 @pytest.mark.parametrize(("usage", "reason"), [

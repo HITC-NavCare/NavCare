@@ -1,9 +1,10 @@
-"""Gemini cost calculation from the model_usage the v2 agent records. Foundation only.
+"""Estimated Gemini model-token cost of one request, from the model_usage the v2 agent records.
 
-- GEMINI_PRICES has no production prices yet, so every real model returns unknown.
-- Add a row only after checking it on VERTEX_PRICING_URL, with source and checked_on.
-- The result covers model tokens only, not the total request cost (Routes, Cloud Run, credits).
-- prompt_tokens includes cached tokens, so input cost at the full rate is an upper bound.
+- Model tokens only, not the total request cost (Routes, Cloud Run, credits are left out).
+- Cached-token counts are not recorded, so all input is priced at the full rate. This may
+  overestimate input cost.
+- Priced: gemini-3.8-flash, Vertex AI Standard PayGo, global endpoint, verified on
+  VERTEX_PRICING_URL. Other models, locations and dates give unknown.
 - Missing or invalid usage, or no price for the model, location and date, gives None, never 0.
 """
 
@@ -16,7 +17,19 @@ CURRENCY = "USD"
 
 # Rows: model, location, from, until (dates, None = open), input_per_million,
 # output_per_million (output includes thinking tokens), source, checked_on.
-GEMINI_PRICES = ()
+# Standard PayGo, global. The page gives no start date for the introductory price, so it starts
+# on the day it was checked; earlier dates are unknown.
+PRICES_CHECKED_ON = date(2026, 11, 22)
+GEMINI_PRICES = (
+    {"model": "gemini-3.8-flash", "location": "global",
+     "from": PRICES_CHECKED_ON, "until": date(2026, 12, 31),
+     "input_per_million": 0.75, "output_per_million": 3.75,
+     "source": VERTEX_PRICING_URL, "checked_on": PRICES_CHECKED_ON},
+    {"model": "gemini-3.8-flash", "location": "global",
+     "from": date(2027, 1, 1), "until": None,
+     "input_per_million": 1.50, "output_per_million": 7.50,
+     "source": VERTEX_PRICING_URL, "checked_on": PRICES_CHECKED_ON},
+)
 TOKEN_FIELDS = ("prompt_tokens", "output_tokens")
 
 
