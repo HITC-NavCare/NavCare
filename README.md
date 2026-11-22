@@ -116,6 +116,31 @@ and cost per request. Because the split happens inside the app, Cloud Run's own 
 from v2; the dashboard uses these lines. Fallbacks and errors are the same line at WARNING or ERROR, with the
 real error in `message`.
 
+**Correctness for the canary.** A 200 can still be wrong, so [app/quality/correctness.py](app/quality/correctness.py)
+checks each response: it must match the response schema in `docs/openapi.yaml`, use real hospital ids whose
+name, address and coordinates match `data/hospitals.csv`, stay within the radius, have numbers that add up,
+follow each engine's rules (no specialised ER without a message, `call_911` for emergency phrases, `note`
+when v1 did not read the message, `model_usage` for v2) and, for v2 requests without a message, share at
+least 2 of v1's top 4 hospitals for the same request. The full list is at the top of the file.
+
+```bash
+python -m app.quality.correctness results.jsonl --min-percent 95
+```
+
+`results.jsonl` has one JSON object per line: `{"request": {"lat", "lon", "limit", "radius_km", "message"},
+"status": 200, "response": {...}, "v1_response": {...}, "engine": "v2"}`. `lat` and `lon` are required;
+`limit`, `radius_km` and `message` may be missing or null. `v1_response` is optional, but without a valid
+one v2 is not compared with v1 (the summary counts these). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
+whose error body doesn't name the engine, are counted under it. Only record it where `ENGINE_HEADER_ENABLED=true`;
+elsewhere the canary split ignores the header and the engine would be wrong. It prints the % correct per engine and the
+problems found. Non-200 responses are not checked; they count towards the error rate, and so does a
+`status` of `0` or `null` (no HTTP response, e.g. a timeout). A line that can't be
+checked (including one that isn't valid JSON or UTF-8) is reported as a bad record and the run goes on.
+Exit code: 0 when every engine reaches `--min-percent` (default 100), each engine has at least one 200 of its
+own to check (so a v2 that always fell back to v1 fails) and there are no bad records; 1 otherwise, including
+for an empty file; 2 when the file can't be opened.
+It needs `requirements-dev.txt` and is not part of the deployed API.
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words. Through the API

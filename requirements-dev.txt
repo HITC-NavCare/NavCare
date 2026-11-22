@@ -4,3 +4,8 @@ ruff==0.17.1
 pytest==9.2.0
 pytest-cov==7.1.0
 httpx==0.28.1
+# For the correctness checker (app/quality/correctness.py): reads and validates against docs/openapi.yaml.
+jsonschema==4.26.0
+PyYAML==6.0.3
+# Lets jsonschema check `format: date-time`.
+rfc3339-validator==0.1.4
