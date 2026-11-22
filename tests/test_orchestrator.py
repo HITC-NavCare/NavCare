@@ -110,8 +110,8 @@ AGENT_RESULT = {
 def test_agent_response_adds_engine_origin_and_disclaimer(monkeypatch):
     calls = []
 
-    def run_agent(lat, lon, message, limit):
-        calls.append((lat, lon, message, limit))
+    def run_agent(lat, lon, message, limit, started):
+        calls.append((lat, lon, message, limit, started))
         return AGENT_RESULT
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", run_agent)
@@ -119,7 +119,7 @@ def test_agent_response_adds_engine_origin_and_disclaimer(monkeypatch):
     output = orchestrator.get_agent_recommended_hospitals(45.5, -73.6, "fever", limit=2)
     result = json.loads(output)
 
-    assert calls == [(45.5, -73.6, "fever", 2)]
+    assert calls == [(45.5, -73.6, "fever", 2, None)]  # no fault: the agent's own limit
     assert result == {
         "engine": "v2",
         "origin": {"lat": 45.5, "lon": -73.6},
@@ -130,7 +130,7 @@ def test_agent_response_adds_engine_origin_and_disclaimer(monkeypatch):
 
 
 def test_build_agent_recommendations_returns_a_dict_for_the_api(monkeypatch):
-    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
+    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args, **kwargs: AGENT_RESULT)
 
     result = orchestrator.build_agent_recommendations(45.5, -73.6, "fever")
 
@@ -139,7 +139,7 @@ def test_build_agent_recommendations_returns_a_dict_for_the_api(monkeypatch):
 
 
 def test_agent_response_has_every_v1_field(fake_services, monkeypatch):
-    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
+    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args, **kwargs: AGENT_RESULT)
 
     v1 = json.loads(orchestrator.get_recommended_hospitals(45.5, -73.6))
     v2 = json.loads(orchestrator.get_agent_recommended_hospitals(45.5, -73.6))
@@ -148,7 +148,7 @@ def test_agent_response_has_every_v1_field(fake_services, monkeypatch):
 
 
 def test_safety_net_raises_call_911_when_the_model_did_not(monkeypatch):
-    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args: AGENT_RESULT)
+    monkeypatch.setattr(orchestrator.agent, "run_agent", lambda *args, **kwargs: AGENT_RESULT)
 
     result = orchestrator.build_agent_recommendations(45.5, -73.6, "chest pain since an hour")
 
@@ -158,7 +158,7 @@ def test_safety_net_raises_call_911_when_the_model_did_not(monkeypatch):
 
 def test_safety_net_never_lowers_call_911(monkeypatch):
     monkeypatch.setattr(orchestrator.agent, "run_agent",
-                        lambda *args: {**AGENT_RESULT, "call_911": True})
+                        lambda *args, **kwargs: {**AGENT_RESULT, "call_911": True})
 
     result = orchestrator.build_agent_recommendations(45.5, -73.6, "my wrist hurts a lot")
 
@@ -170,7 +170,7 @@ def test_safety_net_never_lowers_call_911(monkeypatch):
 )
 def test_fallback_call_911_comes_from_the_safety_net(fake_services, monkeypatch, message,
                                                       expected):
-    def failing(*args):
+    def failing(*args, **kwargs):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
@@ -181,7 +181,7 @@ def test_fallback_call_911_comes_from_the_safety_net(fake_services, monkeypatch,
 
 
 def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
-    def failing(*args):
+    def failing(*args, **kwargs):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
@@ -201,7 +201,7 @@ def test_agent_failure_falls_back_to_v1_ranking(fake_services, monkeypatch):
 
 
 def test_agent_fallback_uses_the_requested_radius(fake_services, monkeypatch):
-    def failing(*args):
+    def failing(*args, **kwargs):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
@@ -214,7 +214,7 @@ def test_agent_fallback_uses_the_requested_radius(fake_services, monkeypatch):
 def test_agent_fallback_keeps_the_model_usage_so_far(fake_services, monkeypatch):
     usage = {"model": "gemini-test", "model_calls": 2, "tool_calls": 1}
 
-    def failing(*args):
+    def failing(*args, **kwargs):
         error = orchestrator.agent.AgentError("Gemini request failed: 503")
         error.model_usage = usage
         raise error
@@ -230,7 +230,7 @@ def test_agent_fallback_keeps_the_model_usage_so_far(fake_services, monkeypatch)
 @pytest.mark.parametrize("bug", [KeyError("hospital"), TypeError("bad args"), RuntimeError("x")])
 def test_unexpected_agent_error_falls_back_to_v1(fake_services, monkeypatch, caplog, bug):
     # A bug in v2 must not leave the person without a hospital list.
-    def failing(*args):
+    def failing(*args, **kwargs):
         bug.model_usage = {"model": "gemini-test", "model_calls": 1, "tool_calls": 0}
         raise bug
 
@@ -250,7 +250,7 @@ def test_unexpected_agent_error_falls_back_to_v1(fake_services, monkeypatch, cap
 
 
 def test_unexpected_agent_error_without_usage_still_falls_back(fake_services, monkeypatch):
-    def failing(*args):
+    def failing(*args, **kwargs):
         raise ValueError("no usage attached")
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
@@ -263,7 +263,7 @@ def test_unexpected_agent_error_without_usage_still_falls_back(fake_services, mo
 
 @pytest.mark.parametrize("message", [None, "", "   "])
 def test_agent_fallback_has_no_note_without_a_message(fake_services, monkeypatch, message):
-    def failing(*args):
+    def failing(*args, **kwargs):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
 
     monkeypatch.setattr(orchestrator.agent, "run_agent", failing)
@@ -274,7 +274,7 @@ def test_agent_fallback_has_no_note_without_a_message(fake_services, monkeypatch
 
 
 def test_agent_fallback_raises_when_services_fail_too(monkeypatch):
-    def agent_failing(*args):
+    def agent_failing(*args, **kwargs):
         raise orchestrator.agent.AgentError("Gemini request failed: 503")
 
     def service_failing(*args, **kwargs):

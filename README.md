@@ -146,16 +146,18 @@ It needs `requirements-dev.txt` and is not part of the deployed API.
 Makes v2 fail or slow down on purpose ([fault_injection.py](app/agent_v2/fault_injection.py)). Set only by
 environment variables; off by default; affects only requests routed to v2 (and `python main.py v2`).
 
-- `V2_FAULT_MODE=error`: v2 fails before calling Gemini; v1 answers with `engine: "v1_fallback"` and a WARNING log line.
-- `V2_FAULT_MODE=slow`: v2 waits `V2_FAULT_SLOW_SECONDS` (default 35, max 120), then answers normally. The wait is included in `latency_ms`.
-- Unknown mode means off; an invalid wait uses 35. Both log a warning.
+- Needs both `V2_FAULT_ENABLED=true` and a `V2_FAULT_MODE`; either alone does nothing.
+- `error`: v2 fails before calling Gemini; v1 answers with HTTP 200, `engine: "v1_fallback"` and a WARNING log line. The canary must count `v1_fallback` as a v2 failure.
+- `slow`: v2 waits `V2_FAULT_SLOW_SECONDS` (default 35, max 60), using up part of the agent's 60 s Gemini budget, then runs. The wait is in `latency_ms`. A slow 200 is likely but not guaranteed: if the budget runs out, v2 falls back to v1.
+- The budget is not a deadline for the whole request: tool calls and the v1 fallback can run past it.
+- Unknown mode means off; an invalid wait uses 35. Each distinct setting, and an active fault, is logged once.
 - Each waiting request holds a worker thread from a shared pool (40 by default). Enough of them at once make all other requests queue.
 
 ```bash
-# Local: set V2_FAULT_MODE in .env and restart uvicorn; remove it and restart to stop.
+# Local: set both in .env and restart uvicorn; remove them and restart to stop.
 # Cloud Run (each change creates a new revision):
-gcloud run services update <service> --update-env-vars V2_FAULT_MODE=error                 # on
-gcloud run services update <service> --remove-env-vars V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+gcloud run services update <service> --update-env-vars V2_FAULT_ENABLED=true,V2_FAULT_MODE=error                # on
+gcloud run services update <service> --remove-env-vars V2_FAULT_ENABLED,V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
 ```
 
 ## v2 AI agent

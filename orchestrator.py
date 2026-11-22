@@ -75,8 +75,8 @@ def build_agent_recommendations(
     Raises RuntimeError if the fallback's data services fail too.
     """
     try:
-        fault_injection.apply_fault()  # off unless V2_FAULT_MODE is set
-        result = agent.run_agent(user_lat, user_lon, message, limit)
+        started = fault_injection.apply_fault()  # off unless enabled; slow mode's wait start
+        result = agent.run_agent(user_lat, user_lon, message, limit, started=started)
     except Exception as error:
         if isinstance(error, agent.AgentError):
             reason = str(error)
