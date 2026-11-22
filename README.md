@@ -141,6 +141,32 @@ own to check (so a v2 that always fell back to v1 fails) and there are no bad re
 for an empty file; 2 when the file can't be opened.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
+### Fault injection (canary demo)
+
+To show a rollback on purpose, v2 can be made to fail or slow down
+([app/agent_v2/fault_injection.py](app/agent_v2/fault_injection.py)). Only environment variables turn it on,
+never a request header or parameter. It only affects requests the facade sends to v2 (v1 requests never
+read it), and it is off by default. `python main.py v2` uses the same v2 path, so it is affected too.
+
+| `V2_FAULT_MODE` | Effect on v2 requests |
+| --- | --- |
+| unset, empty or `off` | None |
+| `error` | v2 fails before calling Gemini (no model cost). The existing fallback answers with the v1 ranking and `engine: "v1_fallback"`, and logs `v2 fell back to v1: injected fault (V2_FAULT_MODE=error)` as a WARNING. |
+| `slow` | v2 waits `V2_FAULT_SLOW_SECONDS` (default 35), then answers normally with `engine: "v2"`. The agent still gets its full 60 seconds, so the latency is the wait plus the usual v2 time. |
+
+Invalid values fail safe and log a warning: an unknown mode means off, and a wait that is not a number
+above 0 and up to 120 seconds uses the default of 35.
+
+- **Locally:** set the variables in `.env` and restart uvicorn. To stop, remove them (or set `V2_FAULT_MODE=off`) and restart.
+- **Cloud Run:** `gcloud run services update <service> --update-env-vars V2_FAULT_MODE=error`; to stop,
+  `gcloud run services update <service> --remove-env-vars V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS`.
+  Each change creates a new revision. Remove the fault as soon as the demo is over.
+
+While it waits, a slow v2 request holds one of the server's worker threads (the endpoint is a plain
+function, which FastAPI runs in a thread pool of 40 by default). Other requests are still served, but
+more than about 40 slow requests at once would make the rest queue. Keep the wait plus v2's time under
+the Cloud Run request timeout, or clients get a timeout instead of a slow answer.
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words. Through the API
