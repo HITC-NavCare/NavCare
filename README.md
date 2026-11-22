@@ -144,9 +144,13 @@ It needs `requirements-dev.txt` and is not part of the deployed API.
 **Load test for the canary.** [loadtest/run.py](loadtest/run.py) starts requests at a fixed rate (slow v2
 answers overlap instead of slowing the test), cycling through 5 places (Montréal to rural Mont-Laurier) × 5
 messages (none, a child with a fever in French, a mental-health crisis, chest pain, a sprained ankle). It saves
-each answer with its client-side latency to `loadtest/results/` (ignored by Git) in the checker's format, prints
-the error rate and p50/p95 latency per engine, then runs the correctness checker. For v2 answers to requests
-without a message, it also asks v1 the same question so the checker can compare them.
+each answer as it arrives, with its client-side latency, to `loadtest/results/` (ignored by Git) in the checker's
+format, so a run stopped with Ctrl-C keeps what it already sent. It prints the error rate (non-200s, timeouts,
+connection errors and 200s that aren't JSON) and p50/p95 latency per engine, then runs the correctness checker.
+
+With `--engine v2`, it also asks v1 the same question for v2 answers without a message, so the checker can
+compare them. With `--engine split` that is off by default: production ignores `X-Engine`, so the "v1" request
+would go through the split again and add unplanned traffic to the canary. `--compare`/`--no-compare` override it.
 
 ```bash
 # Against a local server (start it with ENGINE_HEADER_ENABLED=true to force an engine)
@@ -157,11 +161,12 @@ python -m loadtest.run --url https://<service-url> --engine split --rate 30 --du
 
 Every request uses the real paid services, even against a local server: the Routes API is billed per
 origin-hospital pair (up to 15 per request, more when v2 searches twice) and each v2 request makes up to 8
-Gemini calls. So `--max-requests` is a hard cap (default 20), a bigger run or one against a server that is not
-local needs `--yes`, and `--dry-run` prints the plan without sending anything. Estimate the cost of a step
-before running it. `--engine v1`/`v2` needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the
-header was ignored. The exit code is the checker's (`--min-percent` is passed to it), or 2 when the run did not
-start.
+Gemini calls. So `--max-requests` caps the load requests (default 20), the plan printed first also counts the
+v1 comparison requests, a run of more than 20 requests in all or one against a server that is not local needs
+`--yes`, and `--dry-run` prints the plan without sending anything. Options are checked before anything is sent
+(`--radius-km` 1–200, `--min-percent` 0–100). Estimate the cost of a step before running it. `--engine v1`/`v2`
+needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the header was ignored. The exit code is the
+checker's (`--min-percent` is passed to it), 1 when the run was interrupted, or 2 when it did not start.
 
 ## v2 AI agent
 
