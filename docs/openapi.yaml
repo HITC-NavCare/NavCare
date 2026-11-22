@@ -109,54 +109,44 @@ paths:
                 note: null
                 model_usage: null
                 data_updated_at: '2026-10-22T14:00:00-04:00'
-                origin: { lat: 45.5017, lon: -73.5673 }
+                origin: { lat: 45.497, lon: -73.579 }
                 radius_km: 50
-                weather_now:
-                  date: '2026-10-22 18:00:00+00:00'
-                  temperature_2m: 8.4
-                  precipitation: 0.0
-                  snowfall: 0.0
-                travel_time_multiplier: 1.0
                 recommendations:
                   - rank: 1
                     hospital:
-                      id: '51218097'
-                      name: HÔPITAL DE VERDUN
-                      address: 4000, boulevard LaSalle, Montréal, QC H4G 2A3
-                      lat: 45.4640998840332
-                      lon: -73.56400299072266
-                    travel_minutes: 11.4
-                    distance_km: 6.2
-                    estimated_wait_minutes: 200
-                    expected_minutes: 211
-                    occupancy_rate: 0.95
-                    patients_waiting: 12
+                      id: H0001
+                      name: Example Hospital A
+                      address: 1650 Example Ave, Montréal, QC
+                      lat: 45.497
+                      lon: -73.588
+                    travel_minutes: 9
+                    distance_km: 2.1
+                    occupancy_rate: 0.82
                     patients_over_24h: 3
-                    avg_ambulatory_stay_hours: 3.5
-                    reason: 'Fastest expected care: about 11 min drive + 200 min in the ER.'
+                    expected_occupancy_at_arrival: 0.85
+                    score: 0.91
+                    reason: Short drive and moderate occupancy; usually quiet at this hour.
                   - rank: 2
                     hospital:
-                      id: '12934659'
-                      name: HÔPITAL MAISONNEUVE-ROSEMONT
-                      address: 5415, boulevard de l'Assomption, Montréal, QC H1T 2M4
-                      lat: 45.57419967651367
-                      lon: -73.55850219726562
-                    travel_minutes: 16.0
-                    distance_km: 9.8
-                    estimated_wait_minutes: 216
-                    expected_minutes: 232
-                    occupancy_rate: 1.2
-                    patients_waiting: 25
-                    patients_over_24h: 9
-                    avg_ambulatory_stay_hours: 3.0
-                    reason: 'Compared with #1: 5 min longer drive, 16 min more in the ER.'
+                      id: H0002
+                      name: Example Hospital B
+                      address: 3830 Example Blvd, Montréal, QC
+                      lat: 45.473
+                      lon: -73.608
+                    travel_minutes: 14
+                    distance_km: 4.6
+                    occupancy_rate: 1.05
+                    patients_over_24h: 6
+                    expected_occupancy_at_arrival: 1.10
+                    score: 0.74
+                    reason: Close, but above capacity and usually busier at this hour.
                 unranked_nearby:
                   - hospital:
-                      id: '12475976'
-                      name: HÔPITAL DU SACRÉ-COEUR-DE-MONTRÉAL
-                      address: 5400, boulevard Gouin Ouest, Montréal, QC H4J 1C5
-                      lat: 45.53260040283203
-                      lon: -73.71399688720703
+                      id: H0003
+                      name: Example Hospital C
+                      address: 5400 Example St, Montréal, QC
+                      lat: 45.588
+                      lon: -73.639
                     cause: no_current_data
                 disclaimer: Not for life-threatening emergencies. Call 911.
         '400':
@@ -475,12 +465,7 @@ components:
 
     Recommendation:
       type: object
-      description: |
-        The ER numbers (estimated_wait_minutes to avg_ambulatory_stay_hours) are null only
-        when v2 recommended an ER that has no current ER data. v1 never ranks such an ER.
-      required: [rank, hospital, travel_minutes, distance_km, estimated_wait_minutes,
-                 expected_minutes, occupancy_rate, patients_waiting, patients_over_24h,
-                 avg_ambulatory_stay_hours, reason]
+      required: [rank, hospital, travel_minutes, occupancy_rate, score, reason]
       properties:
         rank:
           type: integer
@@ -489,39 +474,25 @@ components:
           $ref: '#/components/schemas/HospitalSummary'
         travel_minutes:
           type: number
-          description: Driving time in live traffic (Google Maps Routes API), adjusted for the weather.
+          description: Estimated driving time (Google Maps Routes API).
         distance_km:
           type: number
-          description: Road distance.
-        estimated_wait_minutes:
-          type: number
-          nullable: true
-          description: |
-            Estimated minutes in the ER: the average stay of walk-in patients (previous day,
-            MSSS) scaled by current stretcher occupancy. Used to compare ERs, not a promise.
-        expected_minutes:
-          type: number
-          nullable: true
-          description: travel_minutes + estimated_wait_minutes. v1 ranks by this, lowest first.
         occupancy_rate:
           type: number
-          nullable: true
-          description: Current stretcher occupancy rate. Can exceed 1.0 when the ER is over capacity.
-        patients_waiting:
-          type: integer
-          nullable: true
-          description: People waiting to be seen by a physician.
+          description: Current stretcher occupancy rate.
         patients_over_24h:
           type: integer
-          nullable: true
-          description: Patients on a stretcher for more than 24 hours.
-        avg_ambulatory_stay_hours:
+        expected_occupancy_at_arrival:
           type: number
-          nullable: true
-          description: Average stay of walk-in patients on the previous day, in hours.
+          description: Usual occupancy for this weekday and arrival hour, from NAVCare's history.
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Overall score; higher is better.
         reason:
           type: string
-          description: Short explanation. v2 writes it in the language of the person's message.
+          description: Short explanation, in the requested language.
 
     UnrankedHospital:
       type: object
@@ -540,8 +511,7 @@ components:
 
     RecommendationResponse:
       type: object
-      required: [request_id, requested_at, engine, call_911, note, model_usage, data_updated_at,
-                 origin, recommendations, disclaimer]
+      required: [request_id, requested_at, engine, data_updated_at, origin, recommendations, disclaimer]
       properties:
         request_id:
           type: string
@@ -595,25 +565,7 @@ components:
               type: number
         radius_km:
           type: number
-          description: Search radius actually used. v1 uses the requested one; v2 chooses its own.
-        weather_now:
-          type: object
-          nullable: true
-          description: |
-            Open-Meteo forecast for the current hour at the origin. Null when v2 did not
-            check the weather.
-          properties:
-            date:
-              type: string
-            temperature_2m:
-              type: number
-            precipitation:
-              type: number
-            snowfall:
-              type: number
-        travel_time_multiplier:
-          type: number
-          description: Factor applied to driving times for the current weather (1.0 = no effect).
+          description: Search radius actually used (may be wider than requested if nearby ERs are full).
         recommendations:
           type: array
           items:
