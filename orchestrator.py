@@ -72,13 +72,10 @@ def build_agent_recommendations(
     The same happens on any unexpected error in v2 (a bug): a person still gets a hospital
     list instead of a 500, and the error's stack trace is logged.
     radius_km is only used by that fallback; the agent chooses its own search radius.
-    If V2_FAULT_MODE is set (canary demo), the fault is applied first: see
-    app/agent_v2/fault_injection.py.
     Raises RuntimeError if the fallback's data services fail too.
     """
     try:
-        # Off unless V2_FAULT_MODE is set (canary demo); error mode uses the fallback below.
-        fault_injection.apply_fault()
+        fault_injection.apply_fault()  # off unless V2_FAULT_MODE is set
         result = agent.run_agent(user_lat, user_lon, message, limit)
     except Exception as error:
         if isinstance(error, agent.AgentError):

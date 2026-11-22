@@ -143,32 +143,20 @@ It needs `requirements-dev.txt` and is not part of the deployed API.
 
 ### Fault injection (canary demo)
 
-To show a rollback on purpose, v2 can be made to fail or slow down
-([app/agent_v2/fault_injection.py](app/agent_v2/fault_injection.py)). Only environment variables turn it on,
-never a request header or parameter. It only affects requests the facade sends to v2 (v1 requests never
-read it), and it is off by default. `python main.py v2` uses the same v2 path, so it is affected too.
+Makes v2 fail or slow down on purpose ([fault_injection.py](app/agent_v2/fault_injection.py)). Set only by
+environment variables; off by default; affects only requests routed to v2 (and `python main.py v2`).
 
-| `V2_FAULT_MODE` | Effect on v2 requests |
-| --- | --- |
-| unset, empty or `off` | None |
-| `error` | v2 fails before calling Gemini (no model cost). The existing fallback answers with the v1 ranking and `engine: "v1_fallback"`, and logs `v2 fell back to v1: injected fault (V2_FAULT_MODE=error)` as a WARNING. |
-| `slow` | v2 waits `V2_FAULT_SLOW_SECONDS` (default 35), then answers normally with `engine: "v2"`. The agent still gets its full 60 seconds, so the latency is the wait plus the usual v2 time. |
+- `V2_FAULT_MODE=error`: v2 fails before calling Gemini; v1 answers with `engine: "v1_fallback"` and a WARNING log line.
+- `V2_FAULT_MODE=slow`: v2 waits `V2_FAULT_SLOW_SECONDS` (default 35, max 120), then answers normally. The wait is included in `latency_ms`.
+- Unknown mode means off; an invalid wait uses 35. Both log a warning.
+- Each waiting request holds a worker thread from a shared pool (40 by default). Enough of them at once make all other requests queue.
 
-Invalid values fail safe and log a warning: an unknown mode means off, and a wait that is not a number
-above 0 and up to 120 seconds uses the default of 35.
-
-- **Locally:** set the variables in `.env` and restart uvicorn. To stop, remove them (or set `V2_FAULT_MODE=off`) and restart.
-- **Cloud Run:** `gcloud run services update <service> --update-env-vars V2_FAULT_MODE=error`; to stop,
-  `gcloud run services update <service> --remove-env-vars V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS`.
-  Each change creates a new revision. Remove the fault as soon as the demo is over.
-
-Slow mode blocks the request's worker thread, not the whole server. FastAPI runs the endpoint in a
-thread pool (40 threads per server process by default) that every request shares, `/v1/health`
-included. While threads are free, other requests are served as usual. If enough requests are waiting
-at once to use up the pool, every other request queues until a thread frees up, and v1's latency rises
-too. Roughly, threads in use ≈ v2 requests per second × (wait + usual v2 time), plus the other requests
-in progress, so keep the load and the wait small. Keep the wait plus v2's time under the Cloud Run
-request timeout, or clients get a timeout instead of a slow answer.
+```bash
+# Local: set V2_FAULT_MODE in .env and restart uvicorn; remove it and restart to stop.
+# Cloud Run (each change creates a new revision):
+gcloud run services update <service> --update-env-vars V2_FAULT_MODE=error                 # on
+gcloud run services update <service> --remove-env-vars V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+```
 
 ## v2 AI agent
 

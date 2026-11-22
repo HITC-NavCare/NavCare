@@ -28,14 +28,14 @@ AGENT_RESULT = {
 
 @pytest.fixture(autouse=True)
 def all_traffic_to_v1(monkeypatch):
-    # A local .env may set these; tests that need other values set them themselves.
+    # A local .env may set these.
     monkeypatch.setenv(facade.V2_TRAFFIC_ENV_VAR, "0")
     monkeypatch.setenv(facade.HEADER_ENABLED_ENV_VAR, "true")
 
 
 @pytest.fixture
 def sleeps(monkeypatch):
-    """Replaces the slow mode's wait, so no test really waits. Records the seconds asked for."""
+    """Fake wait: records the seconds instead of sleeping."""
     calls = []
     monkeypatch.setattr(fault_injection, "time", SimpleNamespace(sleep=calls.append))
     return calls
@@ -43,11 +43,11 @@ def sleeps(monkeypatch):
 
 @pytest.fixture
 def engines(monkeypatch, sleeps):
-    """Fakes v2's agent and v1's ranking. Records the order of waits and engine calls."""
+    """Fake v2 agent and v1 ranking. Records each call with the number of waits before it."""
     calls = []
 
     def run_agent(*args):
-        calls.append(("agent", len(sleeps)))  # how many waits happened before the agent ran
+        calls.append(("agent", len(sleeps)))
         return AGENT_RESULT
 
     def build_recommendations(*args, **kwargs):
@@ -140,7 +140,7 @@ def test_error_mode_uses_the_existing_fallback_without_calling_gemini(
         "note": orchestrator.FALLBACK_NOTE,
         "model_usage": None,
     }
-    # Handled like any AgentError: no stack trace logged as an unexpected bug.
+    # Handled as an AgentError, not logged as a bug.
     assert not [r for r in caplog.records if r.name == "navcare.orchestrator"]
 
 
@@ -151,7 +151,7 @@ def test_slow_mode_waits_then_runs_v2_normally(monkeypatch, engines, sleeps):
     result = orchestrator.build_agent_recommendations(45.5, -73.6, "fever")
 
     assert sleeps == [7.5]
-    assert engines == [("agent", 1)]  # the wait came before the agent started
+    assert engines == [("agent", 1)]  # waited first
     assert result["engine"] == "v2"
     assert result["model_usage"] == AGENT_RESULT["model_usage"]
 
@@ -217,7 +217,6 @@ def test_error_mode_v2_request_gets_the_v1_list_and_one_fallback_line(
 
 
 def test_split_v2_request_is_also_faulted(monkeypatch, engines):
-    # The fault follows the facade's choice, whether made by the split or by the header.
     monkeypatch.setenv(facade.V2_TRAFFIC_ENV_VAR, "100")
     monkeypatch.setenv(MODE, "error")
 
@@ -250,8 +249,7 @@ def test_a_request_cannot_turn_the_fault_on(engines, sleeps):
 
 
 def test_slow_v2_request_does_not_block_other_requests(monkeypatch, engines):
-    # The endpoint is a sync function, so FastAPI runs each request in a worker thread.
-    # While threads are free, a v2 request held in the slow wait must not stop a v1 request.
+    # The sync endpoint runs in a worker thread, so a waiting v2 request leaves v1 served.
     monkeypatch.setenv(MODE, "slow")
     v2_waiting = threading.Event()
     release = threading.Event()
@@ -280,7 +278,7 @@ def test_slow_v2_request_does_not_block_other_requests(monkeypatch, engines):
     try:
         fast, v2_still_waiting, slow = asyncio.run(scenario())
     finally:
-        release.set()  # never leave the worker thread blocked if an assertion failed
+        release.set()  # unblock the thread even if an assert failed
 
     assert fast.status_code == 200 and fast.json()["engine"] == "v1"
     assert v2_still_waiting
