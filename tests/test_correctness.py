@@ -283,6 +283,32 @@ def test_v2_is_compared_with_v1_only_without_a_message():
     assert correctness.check_response(with_message, shares_one, v1) == []
 
 
+def test_v2_without_a_v1_response_is_counted_as_not_compared():
+    record = {"request": REQUEST, "status": 200, "response": response("v2")}
+    assert correctness.check_record(record)["v1_comparison_skipped"] is True
+    v1 = response("v1")
+    assert correctness.check_record({**record, "v1_response": v1})["v1_comparison_skipped"] is False
+    # With a message, v2 is not meant to be compared: not counted
+    with_message = {**record, "request": {**REQUEST, "message": "I can't drive far"}}
+    assert correctness.check_record(with_message)["v1_comparison_skipped"] is False
+
+
+def test_non_finite_numbers_in_a_response_are_reported():
+    body = response("v2")
+    body["origin"]["lat"] = float("nan")
+    body["recommendations"][0]["travel_minutes"] = float("inf")
+    assert correctness.check_response(REQUEST, body) == [
+        "number: origin/lat: nan is not a finite number",
+        "number: recommendations/0/travel_minutes: inf is not a finite number",
+    ]
+    # Read from a file: json.loads accepts NaN, and the response counts as incorrect
+    line = json.dumps({"request": REQUEST, "status": 200, "response": body})
+    assert "NaN" in line
+    result = correctness.check_record(json.loads(line))
+    assert result["correct"] is False
+    assert result["v1_comparison_skipped"] is False  # the checks stopped before comparing
+
+
 def test_v2_is_not_compared_when_v1_failed():
     error_body = {"error": {"code": "data_unavailable", "message": "Try again.",
                             "request_id": "7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10"}}
@@ -406,8 +432,9 @@ def test_summary_per_engine():
         correctness.check_record({"request": {}, "status": 200, "response": response("v1")}),
     ]
     assert correctness.summarise(results) == {
+        # Both v2 answers have no message and no v1_response, so neither was compared
         "v2": {"checked": 2, "correct": 1, "not_checked": 1, "bad_records": 0,
-               "v1_comparison_skipped": 0, "percent_correct": 50.0},
+               "v1_comparison_skipped": 2, "percent_correct": 50.0},
         "v1": {"checked": 1, "correct": 1, "not_checked": 0, "bad_records": 1,
                "v1_comparison_skipped": 0, "percent_correct": 100.0},
     }
@@ -504,6 +531,42 @@ def test_command_line_fails_when_v2_always_fell_back(tmp_path, capsys):
 def test_command_line_fails_when_nothing_was_checked(tmp_path, capsys, lines):
     assert correctness.main([write_results(tmp_path, lines)]) == 1
     assert "No 200 responses from v1 or v2 were checked" in capsys.readouterr().out
+
+
+def test_command_line_goes_on_after_a_line_nested_too_deeply(tmp_path, capsys):
+    path = tmp_path / "results.jsonl"
+    good = json.dumps({"request": REQUEST, "status": 200, "response": response("v1")})
+    path.write_text(f"{good}\n{'[' * 100_000}{']' * 100_000}\n", encoding="utf-8")
+    assert correctness.main([str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "v1: 1/1 correct (100.0%)" in output
+    assert "line 2: not checked: bad record: not valid JSON (nested too deeply)" in output
+
+
+def test_command_line_ignores_a_byte_order_mark(tmp_path, capsys):
+    path = tmp_path / "results.jsonl"
+    good = json.dumps({"request": REQUEST, "status": 200, "response": response("v1")})
+    path.write_text(f"{good}\n{good}\n", encoding="utf-8-sig")
+    assert correctness.main([str(path)]) == 0
+    assert "v1: 2/2 correct (100.0%)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["nan", "-1", "101", "inf"])
+def test_command_line_rejects_a_min_percent_outside_0_to_100(tmp_path, value):
+    path = write_results(tmp_path, [{"request": REQUEST, "status": 200, "response": response()}])
+    with pytest.raises(SystemExit):
+        correctness.main([path, "--min-percent", value])
+
+
+def test_command_line_says_when_an_engine_had_only_bad_records(tmp_path, capsys):
+    path = write_results(tmp_path, [
+        {"request": {"lon": ORIGIN["lon"]}, "status": 200, "response": response("v1")},
+        {"request": REQUEST, "status": 200, "response": response("v2"), "v1_response": response()},
+    ])
+    assert correctness.main([path]) == 1
+    output = capsys.readouterr().out
+    assert "No response could be checked (only bad records) for: v1" in output
+    assert "No 200 responses to check for" not in output
 
 
 def test_command_line_rejects_a_negative_show(tmp_path):

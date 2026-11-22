@@ -129,8 +129,8 @@ python -m app.quality.correctness results.jsonl --min-percent 95
 
 `results.jsonl` has one JSON object per line: `{"request": {"lat", "lon", "limit", "radius_km", "message"},
 "status": 200, "response": {...}, "v1_response": {...}, "engine": "v2"}`. `lat` and `lon` are required;
-`limit`, `radius_km` and `message` may be missing or null. `v1_response` is optional (v2 is not compared
-when it is an error). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
+`limit`, `radius_km` and `message` may be missing or null. `v1_response` is optional, but without a valid
+one v2 is not compared with v1 (the summary counts these). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
 whose error body doesn't name the engine, are counted under it. Only record it where `ENGINE_HEADER_ENABLED=true`;
 elsewhere the canary split ignores the header and the engine would be wrong. It prints the % correct per engine and the
 problems found. Non-200 responses are not checked; they count towards the error rate. A line that can't be

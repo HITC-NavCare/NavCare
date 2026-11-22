@@ -157,6 +157,22 @@ def response_validator():
     return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
 
 
+def non_finite_problems(node, path=()):
+    """NaN and Infinity (which json.loads accepts) pass every comparison, and the schema
+    takes them as numbers, so report them first."""
+    if isinstance(node, float) and not math.isfinite(node):
+        where = "/".join(str(part) for part in path) or "(top level)"
+        return [f"number: {where}: {node} is not a finite number"]
+    if isinstance(node, dict):
+        items = node.items()
+    elif isinstance(node, list):
+        items = enumerate(node)
+    else:
+        return []
+    return [problem for key, value in items
+            for problem in non_finite_problems(value, (*path, key))]
+
+
 def schema_problems(response):
     problems = []
     for error in sorted(response_validator().iter_errors(response), key=lambda e: list(e.path)):
@@ -220,9 +236,9 @@ def check_response(request, response, v1_response=None):
     valid v1 response. Raises RecordError when the request cannot be read.
     """
     request = parse_request(request)
-    problems = schema_problems(response)
+    problems = non_finite_problems(response) or schema_problems(response)
     if problems:
-        return problems  # the checks below assume the documented shape
+        return problems  # the checks below assume the documented shape and real numbers
 
     engine = response["engine"]
     message = request["message"]
@@ -446,7 +462,7 @@ def check_record(record):
     Non-200 results are not checked (correct is None): the availability criterion counts
     them. A record that cannot be checked has bad=True and its reason in problems.
     v1_comparison_skipped is True for a v2 answer without a message whose v1_response is
-    there but is not a valid v1 response. forced_engine is the record's engine field.
+    missing or not a valid v1 response. forced_engine is the record's engine field.
     """
     result = {"engine": "unknown", "forced_engine": None, "status": None, "correct": None,
               "problems": [], "bad": False, "v1_comparison_skipped": False}
@@ -481,11 +497,13 @@ def check_record(record):
     message = (record.get("request") or {}).get("message")
     # check_response stops after schema problems, before the comparison: then v2's own
     # answer is the reason, not v1's.
-    reached_comparison = not any(problem.startswith("schema:") for problem in problems)
+    reached_comparison = not any(problem.startswith(("schema:", "number:"))
+                                 for problem in problems)
+    # Missing (not recorded) or not a valid v1 answer: either way the comparison did not run.
     result["v1_comparison_skipped"] = (
         reached_comparison and response.get("engine") == "v2"
         and not (isinstance(message, str) and message.strip())
-        and v1_response is not None and not is_v1_answer(v1_response)
+        and not is_v1_answer(v1_response)
     )
     result["correct"] = not problems
     result["problems"] = problems
@@ -521,7 +539,7 @@ def _status(value):
 
 def summarise(results):
     """Per engine: responses checked, correct, % correct, non-200 responses skipped, bad
-    records, and v2 answers not compared with v1 because v1's answer was not valid.
+    records, and v2 answers not compared with v1 because v1's answer was missing or not valid.
 
     An engine the load test forced also gets a row when no response came from it (for
     example every v2 request fell back to v1), so that it shows 0 checked.
@@ -555,13 +573,15 @@ def read_records(path):
     """Read a JSON Lines file: [(line number in the file, record)], blank lines skipped.
 
     A line that is not valid UTF-8 or JSON (for example cut off when the load test was
-    stopped) gives a RecordError as its record, so the other lines are still checked.
+    stopped, or nested too deeply to read) gives a RecordError as its record, so the other
+    lines are still checked. A UTF-8 byte order mark at the start of the file is ignored.
     """
     records = []
     with open(path, "rb") as file:
         for line_number, raw in enumerate(file, start=1):
             try:
-                line = raw.decode("utf-8")
+                # Some Windows tools start the file with a byte order mark
+                line = raw.decode("utf-8-sig" if line_number == 1 else "utf-8")
             except UnicodeDecodeError as error:
                 records.append((line_number, RecordError(f"not valid UTF-8 ({error})")))
                 continue
@@ -571,6 +591,8 @@ def read_records(path):
                 records.append((line_number, json.loads(line)))
             except json.JSONDecodeError as error:
                 records.append((line_number, RecordError(f"not valid JSON ({error})")))
+            except RecursionError:
+                records.append((line_number, RecordError("not valid JSON (nested too deeply)")))
     return records
 
 
@@ -589,6 +611,14 @@ def _count(text):
     return number
 
 
+def _percent(text):
+    """argparse type: a number from 0 to 100 (nan would make every comparison pass)."""
+    number = float(text)
+    if not 0 <= number <= 100:  # also False for nan
+        raise argparse.ArgumentTypeError(f"{text} is not between 0 and 100")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Check load-test results for correctness, per engine."
@@ -596,7 +626,7 @@ def main(argv=None):
     parser.add_argument("results", help="JSON Lines file, one request and response per line")
     parser.add_argument("--show", type=_count, default=10,
                         help="number of incorrect responses to print (default 10)")
-    parser.add_argument("--min-percent", type=float, default=100.0,
+    parser.add_argument("--min-percent", type=_percent, default=100.0,
                         help="exit with 1 when an engine's %% correct is below this "
                              "(default 100)")
     args = parser.parse_args(argv)
@@ -617,7 +647,7 @@ def main(argv=None):
             line += f", {row['bad_records']} bad records"
         if row["v1_comparison_skipped"]:
             line += (f", {row['v1_comparison_skipped']} not compared with v1 "
-                     "(v1's answer was not valid)")
+                     "(no valid v1 answer)")
         print(line)
 
     wrong = [(n, r) for n, r in lines if r["correct"] is False]
@@ -642,10 +672,15 @@ def main(argv=None):
     # the load test did not say the engine of, which the error rate counts instead.
     unchecked = sorted(engine for engine, row in summary.items()
                        if row["checked"] == 0 and engine != "unknown")
+    # Its 200s may all have been bad records: then it did answer, the records are the problem
+    unreadable = [engine for engine in unchecked if summary[engine]["bad_records"]]
+    no_answers = [engine for engine in unchecked if not summary[engine]["bad_records"]]
     if below:
         print(f"\nBelow --min-percent {args.min_percent:g}: {', '.join(below)}")
-    if unchecked:
-        print(f"\nNo 200 responses to check for: {', '.join(unchecked)}")
+    if no_answers:
+        print(f"\nNo 200 responses to check for: {', '.join(no_answers)}")
+    if unreadable:
+        print(f"\nNo response could be checked (only bad records) for: {', '.join(unreadable)}")
     # An empty file, or one with only errors, must not pass the gate.
     nothing_checked = not any(row["checked"] for engine, row in summary.items()
                               if engine != "unknown")
