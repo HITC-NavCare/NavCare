@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Wi
 def deploy(tmp_path, existing=False, **env):
     fake = tmp_path / "gcloud"
     fake.write_text(FAKE_GCLOUD, newline="\n")
+    fake.chmod(0o755)  # deploy.sh runs it directly; Linux needs the execute bit
     log = tmp_path / "calls.log"
     run_env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
                "FAKE_DESCRIBE_EXIT": "0" if existing else "1", **env}
@@ -40,6 +41,13 @@ def deploy(tmp_path, existing=False, **env):
 def only(calls, text):
     (call,) = [c for c in calls if text in c]
     return call
+
+
+def test_script_is_executable_in_git():
+    # The README runs deployment/deploy.sh directly, which needs mode 100755 on macOS and Linux.
+    entry = subprocess.run(["git", "ls-files", "-s", "deployment/deploy.sh"], cwd=REPO,
+                           capture_output=True, text=True).stdout
+    assert entry.startswith("100755 ")
 
 
 def test_first_deploy_creates_the_repo_and_sets_safe_defaults(tmp_path):
