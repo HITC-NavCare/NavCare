@@ -209,6 +209,16 @@ Setup (once per machine):
 Model calls are billed to the project (covered by the trial credit while it lasts). Tests fake Gemini, so they
 cost nothing.
 
+## Deploy to Cloud Run
+
+Dev service `navcare-api-dev` in `northamerica-northeast1`, run as `navcare-run`; the Maps key comes from Secret Manager.
+
+- `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
+- Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
+- `V2_TRAFFIC_PERCENT=0` is set only when the service is created, so a redeploy keeps the canary share. Fault injection stays off. `ENGINE_HEADER_ENABLED` is off unless set to `true` for a controlled dev test; turn it off again afterwards (`gcloud run services update navcare-api-dev --region=northamerica-northeast1 --update-env-vars=ENGINE_HEADER_ENABLED=false`).
+- The script never changes who can call the service. Public access is a one-time step for the project owner.
+- Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
+
 ## Hospital and ER data
 
 Download the latest hourly ER file (standard library only; works from any folder):
