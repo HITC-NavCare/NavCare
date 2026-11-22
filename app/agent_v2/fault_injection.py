@@ -74,8 +74,9 @@ def apply_fault():
     """Apply the configured fault to the current v2 request. Does nothing when off.
 
     Raises AgentError in error mode. In slow mode it blocks the calling thread: the API's
-    recommendations endpoint is a plain (sync) function, which FastAPI runs in a worker
-    thread, so other requests are still served while this one waits.
+    recommendations endpoint is a plain (sync) function, which FastAPI runs in a shared worker
+    thread pool, so the wait holds one of those threads, not the event loop. Other requests are
+    served while threads are free; enough waiting requests at once can use up the pool.
     """
     mode = fault_mode()
     if mode == "error":

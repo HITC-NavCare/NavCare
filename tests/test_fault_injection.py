@@ -251,7 +251,7 @@ def test_a_request_cannot_turn_the_fault_on(engines, sleeps):
 
 def test_slow_v2_request_does_not_block_other_requests(monkeypatch, engines):
     # The endpoint is a sync function, so FastAPI runs each request in a worker thread.
-    # A v2 request held in the slow wait must not stop a v1 request from being served.
+    # While threads are free, a v2 request held in the slow wait must not stop a v1 request.
     monkeypatch.setenv(MODE, "slow")
     v2_waiting = threading.Event()
     release = threading.Event()

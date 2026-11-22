@@ -162,10 +162,13 @@ above 0 and up to 120 seconds uses the default of 35.
   `gcloud run services update <service> --remove-env-vars V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS`.
   Each change creates a new revision. Remove the fault as soon as the demo is over.
 
-While it waits, a slow v2 request holds one of the server's worker threads (the endpoint is a plain
-function, which FastAPI runs in a thread pool of 40 by default). Other requests are still served, but
-more than about 40 slow requests at once would make the rest queue. Keep the wait plus v2's time under
-the Cloud Run request timeout, or clients get a timeout instead of a slow answer.
+Slow mode blocks the request's worker thread, not the whole server. FastAPI runs the endpoint in a
+thread pool (40 threads per server process by default) that every request shares, `/v1/health`
+included. While threads are free, other requests are served as usual. If enough requests are waiting
+at once to use up the pool, every other request queues until a thread frees up, and v1's latency rises
+too. Roughly, threads in use ≈ v2 requests per second × (wait + usual v2 time), plus the other requests
+in progress, so keep the load and the wait small. Keep the wait plus v2's time under the Cloud Run
+request timeout, or clients get a timeout instead of a slow answer.
 
 ## v2 AI agent
 
