@@ -200,6 +200,20 @@ def test_v2_may_leave_er_numbers_null_but_not_only_some():
     problems = correctness.check_response(REQUEST, body)
     assert any("has some ER numbers but not ['occupancy_rate']" in p for p in problems), problems
 
+    # No ER data, but live counts: also mixed
+    body = response("v2")
+    set_er_fields(body["recommendations"][0], None)
+    body["recommendations"][0].update(patients_waiting=12, patients_over_24h=None)
+    assert correctness.check_response(REQUEST, body) == [
+        f"hospital {VERDUN} has no ER data but has ['patients_waiting']"
+    ]
+
+
+def test_live_counts_can_be_null_when_there_is_er_data():
+    body = response()
+    body["recommendations"][0].update(patients_waiting=None, patients_over_24h=None)
+    assert correctness.check_response(REQUEST, body) == []
+
 
 def test_v2_specialised_er_needs_a_message():
     body = response("v2", recommendations=[entry(CHILDREN_ID, 1), entry(VERDUN, 2)])
@@ -283,6 +297,14 @@ def test_v2_is_not_compared_when_v1_failed():
     assert result["v1_comparison_skipped"] is True
     assert correctness.summarise([result])["v2"]["v1_comparison_skipped"] == 1
 
+    # When v2's own answer fails the schema, the comparison never ran: don't blame v1
+    no_disclaimer = {key: value for key, value in v2.items() if key != "disclaimer"}
+    result = correctness.check_record(
+        {"request": REQUEST, "status": 200, "response": no_disclaimer, "v1_response": error_body}
+    )
+    assert result["correct"] is False
+    assert result["v1_comparison_skipped"] is False
+
 
 def test_comparison_needs_no_more_than_v1_recommended():
     v1_one = response("v1", recommendations=[entry(VERDUN, 1)])
@@ -330,8 +352,9 @@ def test_non_200_is_counted_under_the_engine_the_load_test_forced():
     assert correctness.check_record(fallback)["engine"] == "v1_fallback"
 
 
-def test_status_given_as_a_string_is_still_checked():
-    record = {"request": REQUEST, "status": "200", "response": response("v2", call_911=None)}
+@pytest.mark.parametrize("status", ["200", 200.0])
+def test_status_given_as_a_string_or_float_is_still_checked(status):
+    record = {"request": REQUEST, "status": status, "response": response("v2", call_911=None)}
     result = correctness.check_record(record)
     assert result["status"] == 200
     assert result["correct"] is False
@@ -362,6 +385,8 @@ def test_an_engine_that_is_not_a_name_does_not_break_the_summary(engine):
      "bad record: status '²' is not an HTTP status code"),
     ({"request": REQUEST, "status": 2000, "response": response()},
      "bad record: status 2000 is not an HTTP status code"),
+    ({"request": REQUEST, "status": 200.5, "response": response()},
+     "bad record: status 200.5 is not an HTTP status code"),
 ])
 def test_records_that_cannot_be_checked_are_bad(record, expected):
     result = correctness.check_record(record)
@@ -414,6 +439,16 @@ def test_command_line_exit_code_follows_min_percent(tmp_path):
     assert correctness.main([path]) == 1
     assert correctness.main([path, "--min-percent", "75"]) == 0  # 3 of 4 correct
     assert correctness.main([path, "--min-percent", "80"]) == 1
+
+
+def test_command_line_compares_the_exact_share_not_the_rounded_percent(tmp_path, capsys):
+    # 1999 of 2000 correct is 99.95%: printed as 100.0%, but below 100
+    lines = [{"request": REQUEST, "status": 200, "response": response()}] * 1999
+    lines.append({"request": REQUEST, "status": 200, "response": response(call_911=True)})
+    path = write_results(tmp_path, lines)
+    assert correctness.main([path]) == 1
+    assert "v1: 1999/2000 correct (100.0%)" in capsys.readouterr().out
+    assert correctness.main([path, "--min-percent", "99.95"]) == 0
 
 
 def test_command_line_goes_on_after_a_bad_record(tmp_path, capsys):

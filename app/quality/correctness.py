@@ -17,7 +17,8 @@ Data consistency (against data/hospitals.csv and the response's own numbers)
 - Every recommended hospital is within that radius (straight line) of the origin.
 - expected_minutes = travel_minutes + estimated_wait_minutes, and the estimated wait agrees
   with the average stay and occupancy it was computed from (v1's formula).
-- ER numbers are either all present or all null (null only allowed for v2).
+- ER numbers are either all present or all null (null only allowed for v2). When they are all
+  null, patients_waiting and patients_over_24h are null too.
 
 Rules each engine must follow
 - No children's, mental-health or cardiology ER is recommended by v1, or by v2 without a
@@ -44,7 +45,9 @@ Each line: {"request": {"lat", "lon", "limit", "radius_km", "message"}, "status"
 lat and lon are required; limit, radius_km and message may be missing or null (the API
 defaults are used). v1_response is optional. engine is optional: the engine the load test
 forced with the X-Engine header, used to count non-200 responses, whose error body does not
-say which engine failed. status may be a number or a string like "200". A line that cannot be
+say which engine failed. Record it only where ENGINE_HEADER_ENABLED=true: elsewhere the
+canary split ignores the header, and the engine would be wrong. status may be a number
+(200 or 200.0) or a string like "200". A line that cannot be
 checked (not valid JSON, bad request values, a 200 body that is not an object) is reported as
 a bad record, with its line number in the file, instead of stopping the run.
 
@@ -92,6 +95,9 @@ ER_FIELDS = [
     "estimated_wait_minutes", "expected_minutes", "occupancy_rate",
     "avg_ambulatory_stay_hours",
 ]
+# Live counts that can be null on their own (the MSSS feed may leave them out), but must be
+# null when the ER has no data at all.
+ER_COUNT_FIELDS = ["patients_waiting", "patients_over_24h"]
 V1_ENGINES = ("v1", "v1_fallback")
 
 
@@ -346,6 +352,10 @@ def _check_numbers(entry, engine):
             problems.append(f"{engine} ranked hospital {hospital_id} without ER data")
         elif len(missing) != len(ER_FIELDS):
             problems.append(f"hospital {hospital_id} has some ER numbers but not {missing}")
+        else:
+            counts = [field for field in ER_COUNT_FIELDS if entry[field] is not None]
+            if counts:
+                problems.append(f"hospital {hospital_id} has no ER data but has {counts}")
         return problems
 
     total = entry["travel_minutes"] + entry["estimated_wait_minutes"]
@@ -469,8 +479,12 @@ def check_record(record):
                 "problems": [f"checker error: {type(error).__name__}: {error}"]}
 
     message = (record.get("request") or {}).get("message")
+    # check_response stops after schema problems, before the comparison: then v2's own
+    # answer is the reason, not v1's.
+    reached_comparison = not any(problem.startswith("schema:") for problem in problems)
     result["v1_comparison_skipped"] = (
-        response.get("engine") == "v2" and not (isinstance(message, str) and message.strip())
+        reached_comparison and response.get("engine") == "v2"
+        and not (isinstance(message, str) and message.strip())
         and v1_response is not None and not is_v1_answer(v1_response)
     )
     result["correct"] = not problems
@@ -491,10 +505,12 @@ def _engine_name(value):
 
 
 def _status(value):
-    """The HTTP status as an int from 100 to 599 (a string like "200" is accepted), or None."""
+    """The HTTP status as an int from 100 to 599 (200.0 and "200" are accepted), or None."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, str):
+    if isinstance(value, float):
+        value = int(value) if value.is_integer() else None
+    elif isinstance(value, str):
         text = value.strip()
         # isdigit() alone accepts characters like "²" that int() rejects
         value = int(text) if text.isascii() and text.isdigit() else None
@@ -618,9 +634,10 @@ def main(argv=None):
     if len(bad) > args.show:
         print(f"\n... and {len(bad) - args.show} more bad records")
 
+    # Compare the exact share, not the rounded percent: 1999/2000 prints as 100.0% but is
+    # below 100.
     below = sorted(engine for engine, row in summary.items()
-                   if row["percent_correct"] is not None
-                   and row["percent_correct"] < args.min_percent)
+                   if row["checked"] and 100 * row["correct"] < args.min_percent * row["checked"])
     # An engine with no 200 at all has not shown it is correct. "unknown" only holds errors
     # the load test did not say the engine of, which the error rate counts instead.
     unchecked = sorted(engine for engine, row in summary.items()

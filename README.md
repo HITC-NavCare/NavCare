@@ -131,7 +131,8 @@ python -m app.quality.correctness results.jsonl --min-percent 95
 "status": 200, "response": {...}, "v1_response": {...}, "engine": "v2"}`. `lat` and `lon` are required;
 `limit`, `radius_km` and `message` may be missing or null. `v1_response` is optional (v2 is not compared
 when it is an error). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
-whose error body doesn't name the engine, are counted under it. It prints the % correct per engine and the
+whose error body doesn't name the engine, are counted under it. Only record it where `ENGINE_HEADER_ENABLED=true`;
+elsewhere the canary split ignores the header and the engine would be wrong. It prints the % correct per engine and the
 problems found. Non-200 responses are not checked; they count towards the error rate. A line that can't be
 checked (including one that isn't valid JSON or UTF-8) is reported as a bad record and the run goes on.
 Exit code: 0 when every engine reaches `--min-percent` (default 100), each engine has at least one 200 of its
