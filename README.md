@@ -133,8 +133,9 @@ python -m app.quality.correctness results.jsonl --min-percent 95
 when it is an error). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
 whose error body doesn't name the engine, are counted under it. It prints the % correct per engine and the
 problems found. Non-200 responses are not checked; they count towards the error rate. A line that can't be
-checked is reported as a bad record and the run goes on. Exit code: 0 when every engine reaches
-`--min-percent` (default 100) and there are no bad records, 1 otherwise, 2 when the file can't be read.
+checked (including one that isn't valid JSON) is reported as a bad record and the run goes on. Exit code: 0
+when every engine reaches `--min-percent` (default 100), each engine has at least one 200 to check and there
+are no bad records; 1 otherwise; 2 when the file can't be opened.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
 ## v2 AI agent

@@ -175,6 +175,9 @@ def test_missing_or_null_request_values_use_the_api_defaults():
     ({"lon": ORIGIN["lon"]}, "request has no lat"),
     ({**ORIGIN, "lat": "north"}, "request lat 'north' is not a number"),
     ({**ORIGIN, "limit": 2.5}, "request limit 2.5 is not a whole number"),
+    ({**ORIGIN, "lat": float("nan")}, "request lat nan is not a finite number"),
+    ({**ORIGIN, "limit": "nan"}, "request limit 'nan' is not a finite number"),
+    ({**ORIGIN, "radius_km": "inf"}, "request radius_km 'inf' is not a finite number"),
     ({**ORIGIN, "message": 42}, "request message 42 is not text"),
 ])
 def test_request_values_that_cannot_be_read(request_, expected):
@@ -322,11 +325,34 @@ def test_non_200_is_counted_under_the_engine_the_load_test_forced():
     assert correctness.check_record(fallback)["engine"] == "v1_fallback"
 
 
+def test_status_given_as_a_string_is_still_checked():
+    record = {"request": REQUEST, "status": "200", "response": response("v2", call_911=None)}
+    result = correctness.check_record(record)
+    assert result["status"] == 200
+    assert result["correct"] is False
+
+
+@pytest.mark.parametrize("engine", [3, ["v1"], {"name": "v1"}, ""])
+def test_an_engine_that_is_not_a_name_does_not_break_the_summary(engine):
+    results = [
+        correctness.check_record({"request": REQUEST, "status": 200,
+                                  "response": {**response("v2"), "engine": engine}}),
+        correctness.check_record({"request": REQUEST, "status": 200, "response": response()}),
+    ]
+    assert results[0]["engine"] == "unknown"
+    assert results[0]["correct"] is False  # the schema check reports it
+    assert sorted(correctness.summarise(results)) == ["unknown", "v1"]
+
+
 @pytest.mark.parametrize("record, expected", [
     ([1, 2], "record is not a JSON object"),
     ({"request": REQUEST, "status": 200, "response": "ok"}, "the 200 response is not a JSON"),
     ({"request": {**REQUEST, "lat": None}, "status": 200, "response": response()},
      "bad record: request has no lat"),
+    ({"request": REQUEST, "status": "OK", "response": response()},
+     "bad record: status 'OK' is not an HTTP status code"),
+    ({"request": REQUEST, "response": response()},
+     "bad record: status None is not an HTTP status code"),
 ])
 def test_records_that_cannot_be_checked_are_bad(record, expected):
     result = correctness.check_record(record)
@@ -396,11 +422,43 @@ def test_command_line_goes_on_after_a_bad_record(tmp_path, capsys):
     assert "line 2: not checked: bad record: request lat 'north' is not a number" in output
 
 
-def test_command_line_reports_a_bad_line(tmp_path, capsys):
+def test_command_line_goes_on_after_a_line_that_is_not_json(tmp_path, capsys):
     path = tmp_path / "results.jsonl"
-    path.write_text('{"status": 200}\nnot json\n', encoding="utf-8")
-    assert correctness.main([str(path)]) == 2
-    assert "line 2: not valid JSON" in capsys.readouterr().err
+    good = json.dumps({"request": REQUEST, "status": 200, "response": response("v1")})
+    path.write_text(f'{good}\n{{"status": 200, "resp\n', encoding="utf-8")  # cut off
+    assert correctness.main([str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "v1: 1/1 correct (100.0%)" in output
+    assert "line 2: not checked: bad record: not valid JSON" in output
+
+
+def test_command_line_cannot_open_the_file(tmp_path, capsys):
+    assert correctness.main([str(tmp_path / "missing.jsonl")]) == 2
+    assert "Could not read results" in capsys.readouterr().err
+
+
+def test_command_line_prints_line_numbers_in_the_file(tmp_path, capsys):
+    path = tmp_path / "results.jsonl"
+    lines = [
+        json.dumps({"request": REQUEST, "status": 200, "response": response("v1")}),
+        "",  # e.g. two runs appended to one file
+        json.dumps({"request": REQUEST, "status": 200, "response": response("v2", call_911=None)}),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    correctness.main([str(path)])
+    assert "line 3 (v2):\n  - v2 did not decide call_911 (null)" in capsys.readouterr().out
+
+
+def test_command_line_fails_an_engine_with_no_200(tmp_path, capsys):
+    path = write_results(tmp_path, [
+        {"request": REQUEST, "status": 200, "response": response("v1")},
+        {"request": REQUEST, "status": 503, "response": ERROR_BODY, "engine": "v2"},
+        {"request": REQUEST, "status": 503, "response": ERROR_BODY},  # engine not recorded
+    ])
+    assert correctness.main([path]) == 1
+    output = capsys.readouterr().out
+    assert "v2: 0/0 correct (n/a), 1 non-200 not checked" in output
+    assert "No 200 responses to check for: v2" in output  # "unknown" is not listed
 
 
 # End to end: responses produced by the real API, v1 ranking and v2 agent code, with only the

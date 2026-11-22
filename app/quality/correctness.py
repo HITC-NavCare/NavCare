@@ -44,16 +44,19 @@ Each line: {"request": {"lat", "lon", "limit", "radius_km", "message"}, "status"
 lat and lon are required; limit, radius_km and message may be missing or null (the API
 defaults are used). v1_response is optional. engine is optional: the engine the load test
 forced with the X-Engine header, used to count non-200 responses, whose error body does not
-say which engine failed. A record that cannot be checked (bad request values, a 200 body that
-is not an object) is reported as a bad record instead of stopping the run.
+say which engine failed. status may be a number or a string like "200". A line that cannot be
+checked (not valid JSON, bad request values, a 200 body that is not an object) is reported as
+a bad record, with its line number in the file, instead of stopping the run.
 
-Exit code: 0 when every engine's % correct is at least --min-percent (default 100) and there
-are no bad records, 1 otherwise, 2 when the file cannot be read.
+Exit code: 0 when every engine's % correct is at least --min-percent (default 100), every
+engine named in the file has at least one 200 to check, and there are no bad records;
+1 otherwise; 2 when the file cannot be opened.
 """
 
 import argparse
 import csv
 import json
+import math
 import sys
 from collections import Counter
 from functools import cache
@@ -187,9 +190,12 @@ def _number(request, key, default=None):
     if isinstance(value, bool):
         raise RecordError(f"request {key} {value!r} is not a number")
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         raise RecordError(f"request {key} {value!r} is not a number") from None
+    if not math.isfinite(number):  # NaN would pass every comparison
+        raise RecordError(f"request {key} {value!r} is not a finite number")
+    return number
 
 
 def is_v1_answer(v1_response):
@@ -434,14 +440,18 @@ def check_record(record):
     result = {"engine": "unknown", "status": None, "correct": None, "problems": [],
               "bad": False, "v1_comparison_skipped": False}
     if not isinstance(record, dict):
-        return {**result, "bad": True, "problems": ["record is not a JSON object"]}
+        return bad_record("record is not a JSON object")
 
     response = record.get("response")
     # The response says which engine answered (v1_fallback included). An error body does
     # not, so use the engine the load test forced, if it recorded one.
-    engine = response.get("engine") if isinstance(response, dict) else None
-    result["engine"] = engine or record.get("engine") or "unknown"
-    result["status"] = status = record.get("status")
+    engine = _engine_name(response.get("engine") if isinstance(response, dict) else None)
+    result["engine"] = engine or _engine_name(record.get("engine")) or "unknown"
+    result["status"] = status = _status(record.get("status"))
+    if status is None:
+        return {**result, "bad": True,
+                "problems": [f"bad record: status {record.get('status')!r} is not an HTTP "
+                             "status code"]}
     if status != 200:
         return result
     if not isinstance(response, dict):
@@ -464,6 +474,29 @@ def check_record(record):
     result["correct"] = not problems
     result["problems"] = problems
     return result
+
+
+def bad_record(problem, engine="unknown"):
+    """The result for a record that cannot be checked."""
+    return {"engine": engine, "status": None, "correct": None, "problems": [problem],
+            "bad": True, "v1_comparison_skipped": False}
+
+
+def _engine_name(value):
+    """An engine name to group results by, or None. A wrong type is reported by the schema
+    check; it must not break the summary (it is used as a key and sorted)."""
+    return value if isinstance(value, str) and value else None
+
+
+def _status(value):
+    """The HTTP status as an int (a string like "200" is accepted), or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
 
 
 def summarise(results):
@@ -492,17 +525,28 @@ def summarise(results):
 
 
 def read_records(path):
-    """Read a JSON Lines file. Raises ValueError naming the line that is not valid JSON."""
+    """Read a JSON Lines file: [(line number in the file, record)], blank lines skipped.
+
+    A line that is not valid JSON (for example cut off when the load test was stopped) gives
+    a RecordError as its record, so the other lines are still checked.
+    """
     records = []
     with open(path, encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
             if not line.strip():
                 continue
             try:
-                records.append(json.loads(line))
+                records.append((line_number, json.loads(line)))
             except json.JSONDecodeError as error:
-                raise ValueError(f"{path}, line {line_number}: not valid JSON ({error})") from error
+                records.append((line_number, RecordError(f"not valid JSON ({error})")))
     return records
+
+
+def check_line(record):
+    """check_record for one item from read_records."""
+    if isinstance(record, RecordError):
+        return bad_record(f"bad record: {record}")
+    return check_record(record)
 
 
 def main(argv=None):
@@ -523,8 +567,8 @@ def main(argv=None):
         print(f"Could not read results: {error}", file=sys.stderr)
         return 2
 
-    results = [check_record(record) for record in records]
-    summary = summarise(results)
+    lines = [(line_number, check_line(record)) for line_number, record in records]
+    summary = summarise([result for _, result in lines])
     for engine, row in sorted(summary.items()):
         percent = "n/a" if row["percent_correct"] is None else f"{row['percent_correct']}%"
         line = (f"{engine}: {row['correct']}/{row['checked']} correct ({percent}), "
@@ -536,7 +580,7 @@ def main(argv=None):
                      "(v1's answer was not valid)")
         print(line)
 
-    wrong = [(i, r) for i, r in enumerate(results, start=1) if r["correct"] is False]
+    wrong = [(n, r) for n, r in lines if r["correct"] is False]
     for line_number, result in wrong[:args.show]:
         print(f"\nline {line_number} ({result['engine']}):")
         for problem in result["problems"]:
@@ -544,15 +588,24 @@ def main(argv=None):
     if len(wrong) > args.show:
         print(f"\n... and {len(wrong) - args.show} more incorrect responses")
 
-    bad = [(i, r) for i, r in enumerate(results, start=1) if r["bad"]]
+    bad = [(n, r) for n, r in lines if r["bad"]]
     for line_number, result in bad[:args.show]:
         print(f"\nline {line_number}: not checked: {result['problems'][0]}")
     if len(bad) > args.show:
         print(f"\n... and {len(bad) - args.show} more bad records")
 
-    below = [engine for engine, row in summary.items()
-             if row["percent_correct"] is not None and row["percent_correct"] < args.min_percent]
-    return 1 if below or bad else 0
+    below = sorted(engine for engine, row in summary.items()
+                   if row["percent_correct"] is not None
+                   and row["percent_correct"] < args.min_percent)
+    # An engine with no 200 at all has not shown it is correct. "unknown" only holds errors
+    # the load test did not say the engine of, which the error rate counts instead.
+    unchecked = sorted(engine for engine, row in summary.items()
+                       if row["checked"] == 0 and engine != "unknown")
+    if below:
+        print(f"\nBelow --min-percent {args.min_percent:g}: {', '.join(below)}")
+    if unchecked:
+        print(f"\nNo 200 responses to check for: {', '.join(unchecked)}")
+    return 1 if below or unchecked or bad else 0
 
 
 if __name__ == "__main__":
