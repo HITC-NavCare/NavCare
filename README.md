@@ -141,6 +141,28 @@ own to check (so a v2 that always fell back to v1 fails) and there are no bad re
 for an empty file; 2 when the file can't be opened.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
+**Load test for the canary.** [loadtest/run.py](loadtest/run.py) starts requests at a fixed rate (slow v2
+answers overlap instead of slowing the test), cycling through 5 places (Montréal to rural Mont-Laurier) × 5
+messages (none, a child with a fever in French, a mental-health crisis, chest pain, a sprained ankle). It saves
+each answer with its client-side latency to `loadtest/results/` (ignored by Git) in the checker's format, prints
+the error rate and p50/p95 latency per engine, then runs the correctness checker. For v2 answers to requests
+without a message, it also asks v1 the same question so the checker can compare them.
+
+```bash
+# Against a local server (start it with ENGINE_HEADER_ENABLED=true to force an engine)
+python -m loadtest.run --engine v1 --rate 30 --duration 60 --max-requests 20
+# A canary step on Cloud Run: the split decides, as for real users
+python -m loadtest.run --url https://<service-url> --engine split --rate 30 --duration 600 --max-requests 300 --yes
+```
+
+Every request uses the real paid services, even against a local server: the Routes API is billed per
+origin-hospital pair (up to 15 per request, more when v2 searches twice) and each v2 request makes up to 8
+Gemini calls. So `--max-requests` is a hard cap (default 20), a bigger run or one against a server that is not
+local needs `--yes`, and `--dry-run` prints the plan without sending anything. Estimate the cost of a step
+before running it. `--engine v1`/`v2` needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the
+header was ignored. The exit code is the checker's (`--min-percent` is passed to it), or 2 when the run did not
+start.
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words. Through the API
