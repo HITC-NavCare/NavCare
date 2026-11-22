@@ -47,7 +47,8 @@ defaults are used). v1_response is optional. engine is optional: the engine the 
 forced with the X-Engine header, used to count non-200 responses, whose error body does not
 say which engine failed. Record it only where ENGINE_HEADER_ENABLED=true: elsewhere the
 canary split ignores the header, and the engine would be wrong. status may be a number
-(200 or 200.0) or a string like "200". A line that cannot be
+(200 or 200.0) or a string like "200"; 0 or null means no HTTP response (a timeout), which
+is counted like any non-200. A line that cannot be
 checked (not valid JSON, bad request values, a 200 body that is not an object) is reported as
 a bad record, with its line number in the file, instead of stopping the run.
 
@@ -159,10 +160,18 @@ def response_validator():
 
 def non_finite_problems(node, path=()):
     """NaN and Infinity (which json.loads accepts) pass every comparison, and the schema
-    takes them as numbers, so report them first."""
-    if isinstance(node, float) and not math.isfinite(node):
-        where = "/".join(str(part) for part in path) or "(top level)"
-        return [f"number: {where}: {node} is not a finite number"]
+    takes them as numbers, so report them first. So are integers too big for a float, which
+    would make the arithmetic below raise OverflowError."""
+    if isinstance(node, (int, float)) and not isinstance(node, bool):
+        try:
+            finite = math.isfinite(node)
+        except OverflowError:
+            finite = False
+        if not finite:
+            where = "/".join(str(part) for part in path) or "(top level)"
+            shown = node if isinstance(node, float) else f"an integer of {len(str(node))} digits"
+            return [f"number: {where}: {shown} is not a finite number"]
+        return []
     if isinstance(node, dict):
         items = node.items()
     elif isinstance(node, list):
@@ -214,7 +223,7 @@ def _number(request, key, default=None):
         raise RecordError(f"request {key} {value!r} is not a number")
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: an int too big for float
         raise RecordError(f"request {key} {value!r} is not a number") from None
     if not math.isfinite(number):  # NaN would pass every comparison
         raise RecordError(f"request {key} {value!r} is not a finite number")
@@ -475,6 +484,16 @@ def check_record(record):
     engine = _engine_name(response.get("engine") if isinstance(response, dict) else None)
     result["forced_engine"] = forced = _engine_name(record.get("engine"))
     result["engine"] = engine or forced or "unknown"
+    raw_status = record.get("status")
+    no_response = raw_status is None or (
+        isinstance(raw_status, (int, float)) and not isinstance(raw_status, bool)
+        and raw_status == 0
+    )
+    if "status" in record and no_response:
+        # No HTTP response (timeout, connection reset): load-test tools record 0 or null.
+        # Like any non-200, the error rate counts it, not correctness.
+        result["status"] = 0
+        return result
     result["status"] = status = _status(record.get("status"))
     if status is None:
         return {**result, "bad": True,
@@ -589,7 +608,7 @@ def read_records(path):
                 continue
             try:
                 records.append((line_number, json.loads(line)))
-            except json.JSONDecodeError as error:
+            except ValueError as error:  # JSONDecodeError, or an integer over 4300 digits
                 records.append((line_number, RecordError(f"not valid JSON ({error})")))
             except RecursionError:
                 records.append((line_number, RecordError("not valid JSON (nested too deeply)")))
@@ -672,7 +691,8 @@ def main(argv=None):
     # the load test did not say the engine of, which the error rate counts instead.
     unchecked = sorted(engine for engine, row in summary.items()
                        if row["checked"] == 0 and engine != "unknown")
-    # Its 200s may all have been bad records: then it did answer, the records are the problem
+    # All its records were bad (a 200 that could not be read, or a bad status): say so
+    # rather than "no 200", which would blame the engine's availability.
     unreadable = [engine for engine in unchecked if summary[engine]["bad_records"]]
     no_answers = [engine for engine in unchecked if not summary[engine]["bad_records"]]
     if below:
@@ -680,7 +700,8 @@ def main(argv=None):
     if no_answers:
         print(f"\nNo 200 responses to check for: {', '.join(no_answers)}")
     if unreadable:
-        print(f"\nNo response could be checked (only bad records) for: {', '.join(unreadable)}")
+        print(f"\nNo response could be checked (all its records were bad) for: "
+              f"{', '.join(unreadable)}")
     # An empty file, or one with only errors, must not pass the gate.
     nothing_checked = not any(row["checked"] for engine, row in summary.items()
                               if engine != "unknown")

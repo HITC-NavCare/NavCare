@@ -309,6 +309,26 @@ def test_non_finite_numbers_in_a_response_are_reported():
     assert result["v1_comparison_skipped"] is False  # the checks stopped before comparing
 
 
+def test_integers_too_big_for_a_float_are_reported_not_crashed_on():
+    body = response("v2")
+    body["recommendations"][0]["hospital"]["lat"] = 10**400
+    assert correctness.check_response(REQUEST, body) == [
+        "number: recommendations/0/hospital/lat: an integer of 401 digits is not a finite number"
+    ]
+    with pytest.raises(correctness.RecordError, match="is not a number"):
+        correctness.check_response({**ORIGIN, "radius_km": 10**400}, response())
+
+
+@pytest.mark.parametrize("status", [0, 0.0, None])
+def test_no_http_response_counts_as_not_200(status):
+    record = {"request": REQUEST, "status": status, "response": None, "engine": "v2"}
+    result = correctness.check_record(record)
+    assert result["bad"] is False
+    assert result["correct"] is None
+    assert result["status"] == 0
+    assert result["engine"] == "v2"
+
+
 def test_v2_is_not_compared_when_v1_failed():
     error_body = {"error": {"code": "data_unavailable", "message": "Try again.",
                             "request_id": "7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10"}}
@@ -565,8 +585,28 @@ def test_command_line_says_when_an_engine_had_only_bad_records(tmp_path, capsys)
     ])
     assert correctness.main([path]) == 1
     output = capsys.readouterr().out
-    assert "No response could be checked (only bad records) for: v1" in output
+    assert "No response could be checked (all its records were bad) for: v1" in output
     assert "No 200 responses to check for" not in output
+
+
+def test_command_line_goes_on_after_an_integer_too_long_to_read(tmp_path, capsys):
+    # json.loads raises a plain ValueError (not JSONDecodeError) above 4300 digits
+    path = tmp_path / "results.jsonl"
+    good = json.dumps({"request": REQUEST, "status": 200, "response": response("v1")})
+    path.write_text(f'{good}\n{{"status": 200, "x": {"1" * 5000}}}\n', encoding="utf-8")
+    assert correctness.main([str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "v1: 1/1 correct (100.0%)" in output
+    assert "line 2: not checked: bad record: not valid JSON" in output
+
+
+def test_command_line_a_timeout_does_not_fail_the_gate(tmp_path, capsys):
+    path = write_results(tmp_path, [
+        {"request": REQUEST, "status": 200, "response": response("v2"), "v1_response": response()},
+        {"request": REQUEST, "status": 0, "engine": "v2"},
+    ])
+    assert correctness.main([path]) == 0
+    assert "v2: 1/1 correct (100.0%), 1 non-200 not checked" in capsys.readouterr().out
 
 
 def test_command_line_rejects_a_negative_show(tmp_path):
