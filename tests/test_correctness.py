@@ -102,7 +102,10 @@ def test_correct_v1_and_v2_responses_have_no_problems():
      "does not match its average stay and occupancy"),
     (lambda r: r["recommendations"][0].update(travel_minutes=-1), "negative travel time"),
     (lambda r: set_er_fields(r["recommendations"][0], None), "v1 ranked hospital 51218097 without"),
-    (lambda r: r.update(radius_km=2), "outside radius_km 2"),
+    (lambda r: r.update(radius_km=2), "v1 used radius_km 2, not the requested 50"),
+    (lambda r: r.pop("radius_km"), "v1 response has no radius_km"),
+    (lambda r: r.update(request_id="abc"), "schema: request_id: 'abc' is not a 'uuid'"),
+    (lambda r: r.update(requested_at="yesterday"), "schema: requested_at: 'yesterday' is not"),
     (lambda r: r["origin"].update(lat=46.8), "is not the requested location"),
     (lambda r: r["recommendations"][1].update(hospital=summary(CHILDREN_ID)),
      "v1 recommended specialised ER 51222800"),
@@ -132,6 +135,51 @@ def test_v1_must_be_ordered_by_expected_minutes():
 def test_more_recommendations_than_the_limit():
     problems = correctness.check_response({**REQUEST, "limit": 1}, response())
     assert problems == ["2 recommendations for a limit of 1"]
+
+
+def test_v1_hospitals_must_be_within_the_requested_radius():
+    # Maisonneuve-Rosemont is about 8 km from the origin.
+    request = {**REQUEST, "radius_km": 5}
+    assert correctness.check_response(request, response(radius_km=50)) == [
+        "v1 used radius_km 50, not the requested 5",
+        f"hospital {MAISONNEUVE} is 8.1 km away, outside radius_km 5",
+    ]
+
+
+def test_v2_chooses_its_radius_up_to_the_maximum():
+    request = {**REQUEST, "radius_km": 5}  # only v1 uses the requested radius
+    assert correctness.check_response(request, response("v2", radius_km=10)) == []
+    assert correctness.check_response(request, response("v2", radius_km=5)) == [
+        f"hospital {MAISONNEUVE} is 8.1 km away, outside radius_km 5"
+    ]
+    too_far = agent.MAX_RADIUS_KM + 50
+    assert correctness.check_response(REQUEST, response("v2", radius_km=too_far)) == [
+        f"v2 radius_km {too_far} is more than the maximum {agent.MAX_RADIUS_KM}"
+    ]
+    no_radius = response("v2")
+    no_radius.pop("radius_km")
+    assert correctness.check_response(REQUEST, no_radius) == [
+        "v2 recommended hospitals but gave no radius_km"
+    ]
+
+
+def test_missing_or_null_request_values_use_the_api_defaults():
+    request = {"lat": str(ORIGIN["lat"]), "lon": ORIGIN["lon"],
+               "limit": None, "radius_km": None, "message": None}
+    assert correctness.check_response(request, response("v1")) == []
+    assert correctness.check_response(ORIGIN, response("v1")) == []
+
+
+@pytest.mark.parametrize("request_, expected", [
+    (None, "request is not a JSON object"),
+    ({"lon": ORIGIN["lon"]}, "request has no lat"),
+    ({**ORIGIN, "lat": "north"}, "request lat 'north' is not a number"),
+    ({**ORIGIN, "limit": 2.5}, "request limit 2.5 is not a whole number"),
+    ({**ORIGIN, "message": 42}, "request message 42 is not text"),
+])
+def test_request_values_that_cannot_be_read(request_, expected):
+    with pytest.raises(correctness.RecordError, match=expected):
+        correctness.check_response(request_, response())
 
 
 def test_v2_may_leave_er_numbers_null_but_not_only_some():
@@ -214,6 +262,21 @@ def test_v2_is_compared_with_v1_only_without_a_message():
     assert correctness.check_response(with_message, shares_one, v1) == []
 
 
+def test_v2_is_not_compared_when_v1_failed():
+    error_body = {"error": {"code": "data_unavailable", "message": "Try again.",
+                            "request_id": "7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10"}}
+    v2 = response("v2", recommendations=[entry(SACRE_COEUR, 1, travel=20)], unranked_nearby=[])
+    assert correctness.check_response(REQUEST, v2, error_body) == []
+    assert correctness.check_response(REQUEST, v2, "not a response") == []
+
+    result = correctness.check_record(
+        {"request": REQUEST, "status": 200, "response": v2, "v1_response": error_body}
+    )
+    assert result["correct"] is True
+    assert result["v1_comparison_skipped"] is True
+    assert correctness.summarise([result])["v2"]["v1_comparison_skipped"] == 1
+
+
 def test_comparison_needs_no_more_than_v1_recommended():
     v1_one = response("v1", recommendations=[entry(VERDUN, 1)])
     v1_none = response("v1", recommendations=[])
@@ -240,9 +303,36 @@ def test_openapi_nullable_becomes_a_null_type():
     }
 
 
+ERROR_BODY = {"error": {"code": "data_unavailable", "message": "Try again.",
+                        "request_id": "7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10"}}
+
+
 def test_records_that_are_not_200_are_not_checked():
     result = correctness.check_record({"request": REQUEST, "status": 503, "response": {}})
-    assert result == {"engine": "unknown", "status": 503, "correct": None, "problems": []}
+    assert result == {"engine": "unknown", "status": 503, "correct": None, "problems": [],
+                      "bad": False, "v1_comparison_skipped": False}
+
+
+def test_non_200_is_counted_under_the_engine_the_load_test_forced():
+    record = {"request": REQUEST, "status": 503, "response": ERROR_BODY, "engine": "v2"}
+    assert correctness.check_record(record)["engine"] == "v2"
+    # A 200 says which engine answered, which wins (v2 can fall back to v1)
+    fallback = {"request": REQUEST, "status": 200, "response": response("v1_fallback"),
+                "engine": "v2"}
+    assert correctness.check_record(fallback)["engine"] == "v1_fallback"
+
+
+@pytest.mark.parametrize("record, expected", [
+    ([1, 2], "record is not a JSON object"),
+    ({"request": REQUEST, "status": 200, "response": "ok"}, "the 200 response is not a JSON"),
+    ({"request": {**REQUEST, "lat": None}, "status": 200, "response": response()},
+     "bad record: request has no lat"),
+])
+def test_records_that_cannot_be_checked_are_bad(record, expected):
+    result = correctness.check_record(record)
+    assert result["bad"] is True
+    assert result["correct"] is None
+    assert expected in result["problems"][0]
 
 
 def test_summary_per_engine():
@@ -252,27 +342,58 @@ def test_summary_per_engine():
                                   "response": response("v2", call_911=None)}),
         correctness.check_record({"request": REQUEST, "status": 200, "response": response("v1")}),
         correctness.check_record({"request": REQUEST, "status": 500,
-                                  "response": {"engine": "v2"}}),
+                                  "response": ERROR_BODY, "engine": "v2"}),
+        correctness.check_record({"request": {}, "status": 200, "response": response("v1")}),
     ]
     assert correctness.summarise(results) == {
-        "v2": {"checked": 2, "correct": 1, "not_checked": 1, "percent_correct": 50.0},
-        "v1": {"checked": 1, "correct": 1, "not_checked": 0, "percent_correct": 100.0},
+        "v2": {"checked": 2, "correct": 1, "not_checked": 1, "bad_records": 0,
+               "v1_comparison_skipped": 0, "percent_correct": 50.0},
+        "v1": {"checked": 1, "correct": 1, "not_checked": 0, "bad_records": 1,
+               "v1_comparison_skipped": 0, "percent_correct": 100.0},
     }
 
 
-def test_command_line_prints_summary_and_problems(tmp_path, capsys):
+def write_results(tmp_path, lines):
     path = tmp_path / "results.jsonl"
-    lines = [
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n\n", encoding="utf-8")
+    return str(path)
+
+
+def test_command_line_prints_summary_and_problems(tmp_path, capsys):
+    path = write_results(tmp_path, [
         {"request": REQUEST, "status": 200, "response": response("v1")},
         {"request": REQUEST, "status": 200, "response": response("v2", call_911=None)},
-    ]
-    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n\n", encoding="utf-8")
-
-    assert correctness.main([str(path)]) == 0
+    ])
+    assert correctness.main([path]) == 1  # v2 is below 100%
     output = capsys.readouterr().out
     assert "v1: 1/1 correct (100.0%), 0 non-200 not checked" in output
     assert "v2: 0/1 correct (0.0%)" in output
     assert "line 2 (v2):\n  - v2 did not decide call_911 (null)" in output
+
+
+def test_command_line_exit_code_follows_min_percent(tmp_path):
+    lines = [{"request": REQUEST, "status": 200, "response": response("v2")}] * 3
+    lines.append({"request": REQUEST, "status": 200, "response": response("v2", call_911=None)})
+    lines.append({"request": REQUEST, "status": 503, "response": ERROR_BODY, "engine": "v2"})
+    path = write_results(tmp_path, lines)
+    assert correctness.main([path]) == 1
+    assert correctness.main([path, "--min-percent", "75"]) == 0  # 3 of 4 correct
+    assert correctness.main([path, "--min-percent", "80"]) == 1
+
+
+def test_command_line_goes_on_after_a_bad_record(tmp_path, capsys):
+    path = write_results(tmp_path, [
+        {"request": {**REQUEST, "limit": None}, "status": 200, "response": response("v1")},
+        {"request": {**REQUEST, "lat": "north"}, "status": 200, "response": response("v1")},
+        {"request": REQUEST, "status": 200, "response": response("v2"),
+         "v1_response": ERROR_BODY},
+    ])
+    assert correctness.main([path]) == 1  # a bad record
+    output = capsys.readouterr().out
+    assert "v1: 1/1 correct (100.0%), 0 non-200 not checked, 1 bad records" in output
+    assert ("v2: 1/1 correct (100.0%), 0 non-200 not checked, 1 not compared with v1"
+            in output)
+    assert "line 2: not checked: bad record: request lat 'north' is not a number" in output
 
 
 def test_command_line_reports_a_bad_line(tmp_path, capsys):

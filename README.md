@@ -124,12 +124,17 @@ when v1 did not read the message, `model_usage` for v2) and, for v2 requests wit
 least 2 of v1's top 4 hospitals for the same request. The full list is at the top of the file.
 
 ```bash
-python -m app.quality.correctness results.jsonl
+python -m app.quality.correctness results.jsonl --min-percent 95
 ```
 
 `results.jsonl` has one JSON object per line: `{"request": {"lat", "lon", "limit", "radius_km", "message"},
-"status": 200, "response": {...}, "v1_response": {...}}` (`v1_response` is optional). It prints the % correct
-per engine and the problems found. Non-200 responses are not checked; they count towards the error rate.
+"status": 200, "response": {...}, "v1_response": {...}, "engine": "v2"}`. `lat` and `lon` are required;
+`limit`, `radius_km` and `message` may be missing or null. `v1_response` is optional (v2 is not compared
+when it is an error). `engine` is optional: the engine forced with `X-Engine`, so that non-200 responses,
+whose error body doesn't name the engine, are counted under it. It prints the % correct per engine and the
+problems found. Non-200 responses are not checked; they count towards the error rate. A line that can't be
+checked is reported as a bad record and the run goes on. Exit code: 0 when every engine reaches
+`--min-percent` (default 100) and there are no bad records, 1 otherwise, 2 when the file can't be read.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
 ## v2 AI agent

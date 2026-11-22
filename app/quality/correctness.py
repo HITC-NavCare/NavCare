@@ -5,14 +5,16 @@ enough. check_response() returns the list of problems found in one response; an 
 means the response is correct. The rules:
 
 Schema
-- The response matches RecommendationResponse in docs/openapi.yaml.
+- The response matches RecommendationResponse in docs/openapi.yaml, including its formats
+  (uuid, date-time).
 
 Data consistency (against data/hospitals.csv and the response's own numbers)
 - Every hospital id is a known MSSS id, and its name, address and coordinates match our data.
 - No hospital is listed twice, or both recommended and unranked.
 - Ranks are 1, 2, 3... in order, with no more recommendations than the requested limit.
-- Every recommended hospital is within radius_km (straight line) of the origin, and the origin
-  is the requested location.
+- The origin is the requested location. v1 (and v1_fallback) use the requested radius_km and
+  say so; v2 gives the radius it searched, at most the agent's MAX_RADIUS_KM.
+- Every recommended hospital is within that radius (straight line) of the origin.
 - expected_minutes = travel_minutes + estimated_wait_minutes, and the estimated wait agrees
   with the average stay and occupancy it was computed from (v1's formula).
 - ER numbers are either all present or all null (null only allowed for v2).
@@ -28,16 +30,25 @@ Rules each engine must follow
 
 Compared with v1 (only for v2 requests without a message, since v2 reads the message)
 - At least MIN_TOP_OVERLAP of v1's top hospitals are also in v2's top hospitals, for the
-  same request. Different wording or order is not an error.
+  same request. Different wording or order is not an error. When v1's answer is missing or
+  is not a valid v1 response (for example a 503), v2 is not compared; the summary counts it.
 
-Dev and canary tool: it needs requirements-dev.txt (jsonschema, PyYAML) and docs/openapi.yaml,
-which are not in the Docker image, so the API must not import it.
+Dev and canary tool: it needs requirements-dev.txt (jsonschema, PyYAML, rfc3339-validator) and
+docs/openapi.yaml, which are not in the Docker image, so the API must not import it.
 
 Check a batch of results (one JSON object per line, as written by the load test):
-    python -m app.quality.correctness results.jsonl
+    python -m app.quality.correctness results.jsonl [--min-percent 95]
 
 Each line: {"request": {"lat", "lon", "limit", "radius_km", "message"}, "status": 200,
-            "response": {...}, "v1_response": {...}}   (v1_response is optional)
+            "response": {...}, "v1_response": {...}, "engine": "v2"}
+lat and lon are required; limit, radius_km and message may be missing or null (the API
+defaults are used). v1_response is optional. engine is optional: the engine the load test
+forced with the X-Engine header, used to count non-200 responses, whose error body does not
+say which engine failed. A record that cannot be checked (bad request values, a 200 body that
+is not an object) is reported as a bad record instead of stopping the run.
+
+Exit code: 0 when every engine's % correct is at least --min-percent (default 100) and there
+are no bad records, 1 otherwise, 2 when the file cannot be read.
 """
 
 import argparse
@@ -52,9 +63,13 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from app import red_flags
-from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS
+from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS, MAX_RADIUS_KM
 from app.recommender_v1 import rules_based_recommender as recommender
-from app.services.nearest_hospital_getter import HOSPITALS_CSV_PATH, straight_line_km
+from app.services.nearest_hospital_getter import (
+    DEFAULT_RADIUS_KM,
+    HOSPITALS_CSV_PATH,
+    straight_line_km,
+)
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "docs" / "openapi.yaml"
 RESPONSE_SCHEMA = "RecommendationResponse"
@@ -74,6 +89,10 @@ ER_FIELDS = [
     "avg_ambulatory_stay_hours",
 ]
 V1_ENGINES = ("v1", "v1_fallback")
+
+
+class RecordError(ValueError):
+    """A load-test record that cannot be checked. A problem with the record, not the response."""
 
 
 @cache
@@ -114,7 +133,10 @@ def openapi_to_json_schema(node):
 
 @cache
 def response_validator():
-    """Validator for RecommendationResponse, with $refs resolved inside the spec."""
+    """Validator for RecommendationResponse, with $refs resolved inside the spec.
+
+    `format` is checked too (uuid, and date-time through rfc3339-validator).
+    """
     spec = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
     schemas = openapi_to_json_schema(spec["components"]["schemas"])
     schema = {
@@ -122,7 +144,7 @@ def response_validator():
         "components": {"schemas": schemas},
     }
     Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
+    return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
 
 
 def schema_problems(response):
@@ -133,24 +155,71 @@ def schema_problems(response):
     return problems
 
 
+def parse_request(request):
+    """The request with the API's defaults filled in. Raises RecordError for bad values.
+
+    lat and lon are required. limit, radius_km and message may be missing or null. Numbers
+    may be strings, as when copied from query parameters.
+    """
+    if not isinstance(request, dict):
+        raise RecordError("request is not a JSON object")
+    limit = _number(request, "limit", recommender.DEFAULT_LIMIT)
+    if limit != int(limit):
+        raise RecordError(f"request limit {request['limit']!r} is not a whole number")
+    message = request.get("message")
+    if message is not None and not isinstance(message, str):
+        raise RecordError(f"request message {message!r} is not text")
+    return {
+        "lat": _number(request, "lat"),
+        "lon": _number(request, "lon"),
+        "limit": int(limit),
+        "radius_km": _number(request, "radius_km", DEFAULT_RADIUS_KM),
+        "message": message,
+    }
+
+
+def _number(request, key, default=None):
+    value = request.get(key)
+    if value is None:
+        if default is None:
+            raise RecordError(f"request has no {key}")
+        return default
+    if isinstance(value, bool):
+        raise RecordError(f"request {key} {value!r} is not a number")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise RecordError(f"request {key} {value!r} is not a number") from None
+
+
+def is_v1_answer(v1_response):
+    """True when v1_response is a valid v1 response that v2 can be compared with."""
+    return (isinstance(v1_response, dict) and v1_response.get("engine") in V1_ENGINES
+            and not schema_problems(v1_response))
+
+
 def check_response(request, response, v1_response=None):
     """Return the problems found in one 200 response; an empty list means it is correct.
 
     request: what was asked, {"lat", "lon", "limit", "radius_km", "message"} (limit,
     radius_km and message are optional). v1_response: v1's answer to the same request,
-    used for the v1 comparison of v2 answers without a message.
+    used for the v1 comparison of v2 answers without a message; skipped when it is not a
+    valid v1 response. Raises RecordError when the request cannot be read.
     """
+    request = parse_request(request)
     problems = schema_problems(response)
     if problems:
         return problems  # the checks below assume the documented shape
 
     engine = response["engine"]
-    message = request.get("message")
+    message = request["message"]
     has_message = bool(message and message.strip())
     recommendations = response["recommendations"]
 
     problems += _check_origin(request, response)
-    problems += _check_recommendations(request, response, engine, has_message)
+    radius_problems, radius_km = _check_radius(request, response, engine)
+    problems += radius_problems
+    problems += _check_recommendations(request, response, engine, has_message, radius_km)
     problems += _check_unranked(response)
     problems += _check_call_911(engine, message, response["call_911"])
     problems += _check_note(engine, has_message, response["note"])
@@ -161,7 +230,7 @@ def check_response(request, response, v1_response=None):
                   if entry["expected_minutes"] is not None]
         if totals != sorted(totals):
             problems.append("v1 recommendations are not ordered by expected_minutes")
-    if engine == "v2" and not has_message and v1_response is not None:
+    if engine == "v2" and not has_message and is_v1_answer(v1_response):
         problems += compare_with_v1(response, v1_response)
     return problems
 
@@ -169,16 +238,39 @@ def check_response(request, response, v1_response=None):
 def _check_origin(request, response):
     origin = response["origin"]
     for key in ("lat", "lon"):
-        if key in request and abs(origin[key] - request[key]) > COORDINATE_TOLERANCE:
+        if abs(origin[key] - request[key]) > COORDINATE_TOLERANCE:
             return [f"origin {origin} is not the requested location"]
     return []
 
 
-def _check_recommendations(request, response, engine, has_message):
+def _check_radius(request, response, engine):
+    """Return (problems, the radius the recommendations must be within).
+
+    v1 must use the requested radius. v2 chooses its own, up to MAX_RADIUS_KM.
+    """
+    radius_km = response.get("radius_km")
+    if engine in V1_ENGINES:
+        requested = request["radius_km"]
+        if radius_km is None:
+            return [f"{engine} response has no radius_km"], requested
+        if abs(radius_km - requested) > RADIUS_TOLERANCE_KM:
+            problem = f"{engine} used radius_km {radius_km:g}, not the requested {requested:g}"
+            return [problem], requested
+        return [], requested
+    if radius_km is None:
+        problems = (["v2 recommended hospitals but gave no radius_km"]
+                    if response["recommendations"] else [])
+        return problems, MAX_RADIUS_KM
+    if radius_km > MAX_RADIUS_KM + RADIUS_TOLERANCE_KM:
+        return [f"v2 radius_km {radius_km} is more than the maximum {MAX_RADIUS_KM}"], radius_km
+    return [], radius_km
+
+
+def _check_recommendations(request, response, engine, has_message, radius_km):
     problems = []
     hospitals = load_hospitals()
     recommendations = response["recommendations"]
-    limit = request.get("limit", recommender.DEFAULT_LIMIT)
+    limit = request["limit"]
     if len(recommendations) > limit:
         problems.append(f"{len(recommendations)} recommendations for a limit of {limit}")
 
@@ -200,7 +292,7 @@ def _check_recommendations(request, response, engine, has_message):
                 problems.append(f"{engine} recommended specialised ER {hospital_id}")
             elif not has_message:
                 problems.append(f"specialised ER {hospital_id} recommended without a message")
-        problems += _check_distance(response, hospital)
+        problems += _check_distance(response["origin"], hospital, radius_km)
         problems += _check_numbers(entry, engine)
         if not entry["reason"].strip():
             problems.append(f"hospital {hospital_id} has an empty reason")
@@ -225,15 +317,11 @@ def _check_hospital(hospital, hospitals):
     return problems
 
 
-def _check_distance(response, hospital):
-    radius_km = response.get("radius_km")
-    if radius_km is None:
-        return []
-    origin = response["origin"]
+def _check_distance(origin, hospital, radius_km):
     distance = straight_line_km(origin["lat"], origin["lon"], hospital["lat"], hospital["lon"])
     if distance > radius_km + RADIUS_TOLERANCE_KM:
         return [
-            f"hospital {hospital['id']} is {distance:.1f} km away, outside radius_km {radius_km}"
+            f"hospital {hospital['id']} is {distance:.1f} km away, outside radius_km {radius_km:g}"
         ]
     return []
 
@@ -336,37 +424,66 @@ def compare_with_v1(response, v1_response, top_k=TOP_K, min_overlap=MIN_TOP_OVER
 
 
 def check_record(record):
-    """Check one load-test result. Non-200 results are not checked: correct is None.
+    """Check one load-test result. Never raises.
 
-    They are counted by the availability criterion instead.
+    Non-200 results are not checked (correct is None): the availability criterion counts
+    them. A record that cannot be checked has bad=True and its reason in problems.
+    v1_comparison_skipped is True for a v2 answer without a message whose v1_response is
+    there but is not a valid v1 response.
     """
-    status = record.get("status")
-    response = record.get("response") or {}
-    result = {
-        "engine": response.get("engine", "unknown"),
-        "status": status,
-        "correct": None,
-        "problems": [],
-    }
+    result = {"engine": "unknown", "status": None, "correct": None, "problems": [],
+              "bad": False, "v1_comparison_skipped": False}
+    if not isinstance(record, dict):
+        return {**result, "bad": True, "problems": ["record is not a JSON object"]}
+
+    response = record.get("response")
+    # The response says which engine answered (v1_fallback included). An error body does
+    # not, so use the engine the load test forced, if it recorded one.
+    engine = response.get("engine") if isinstance(response, dict) else None
+    result["engine"] = engine or record.get("engine") or "unknown"
+    result["status"] = status = record.get("status")
     if status != 200:
         return result
-    problems = check_response(record.get("request", {}), response, record.get("v1_response"))
+    if not isinstance(response, dict):
+        return {**result, "bad": True, "problems": ["the 200 response is not a JSON object"]}
+
+    v1_response = record.get("v1_response")
+    try:
+        problems = check_response(record.get("request"), response, v1_response)
+    except RecordError as error:
+        return {**result, "bad": True, "problems": [f"bad record: {error}"]}
+    except Exception as error:  # one odd record must not stop the batch
+        return {**result, "bad": True,
+                "problems": [f"checker error: {type(error).__name__}: {error}"]}
+
+    message = (record.get("request") or {}).get("message")
+    result["v1_comparison_skipped"] = (
+        response.get("engine") == "v2" and not (isinstance(message, str) and message.strip())
+        and v1_response is not None and not is_v1_answer(v1_response)
+    )
     result["correct"] = not problems
     result["problems"] = problems
     return result
 
 
 def summarise(results):
-    """Per engine: responses checked, correct, % correct, and non-200 responses skipped."""
+    """Per engine: responses checked, correct, % correct, non-200 responses skipped, bad
+    records, and v2 answers not compared with v1 because v1's answer was not valid."""
     summary = {}
     for result in results:
-        row = summary.setdefault(result["engine"],
-                                 {"checked": 0, "correct": 0, "not_checked": 0})
+        row = summary.setdefault(result["engine"], {
+            "checked": 0, "correct": 0, "not_checked": 0, "bad_records": 0,
+            "v1_comparison_skipped": 0,
+        })
+        if result.get("bad"):
+            row["bad_records"] += 1
+            continue
         if result["correct"] is None:
             row["not_checked"] += 1
             continue
         row["checked"] += 1
         row["correct"] += result["correct"]
+        row["v1_comparison_skipped"] += result.get("v1_comparison_skipped", False)
     for row in summary.values():
         row["percent_correct"] = (
             round(100 * row["correct"] / row["checked"], 1) if row["checked"] else None
@@ -395,6 +512,9 @@ def main(argv=None):
     parser.add_argument("results", help="JSON Lines file, one request and response per line")
     parser.add_argument("--show", type=int, default=10,
                         help="number of incorrect responses to print (default 10)")
+    parser.add_argument("--min-percent", type=float, default=100.0,
+                        help="exit with 1 when an engine's %% correct is below this "
+                             "(default 100)")
     args = parser.parse_args(argv)
 
     try:
@@ -404,10 +524,17 @@ def main(argv=None):
         return 2
 
     results = [check_record(record) for record in records]
-    for engine, row in sorted(summarise(results).items()):
+    summary = summarise(results)
+    for engine, row in sorted(summary.items()):
         percent = "n/a" if row["percent_correct"] is None else f"{row['percent_correct']}%"
-        print(f"{engine}: {row['correct']}/{row['checked']} correct ({percent}), "
-              f"{row['not_checked']} non-200 not checked")
+        line = (f"{engine}: {row['correct']}/{row['checked']} correct ({percent}), "
+                f"{row['not_checked']} non-200 not checked")
+        if row["bad_records"]:
+            line += f", {row['bad_records']} bad records"
+        if row["v1_comparison_skipped"]:
+            line += (f", {row['v1_comparison_skipped']} not compared with v1 "
+                     "(v1's answer was not valid)")
+        print(line)
 
     wrong = [(i, r) for i, r in enumerate(results, start=1) if r["correct"] is False]
     for line_number, result in wrong[:args.show]:
@@ -416,7 +543,16 @@ def main(argv=None):
             print(f"  - {problem}")
     if len(wrong) > args.show:
         print(f"\n... and {len(wrong) - args.show} more incorrect responses")
-    return 0
+
+    bad = [(i, r) for i, r in enumerate(results, start=1) if r["bad"]]
+    for line_number, result in bad[:args.show]:
+        print(f"\nline {line_number}: not checked: {result['problems'][0]}")
+    if len(bad) > args.show:
+        print(f"\n... and {len(bad) - args.show} more bad records")
+
+    below = [engine for engine, row in summary.items()
+             if row["percent_correct"] is not None and row["percent_correct"] < args.min_percent]
+    return 1 if below or bad else 0
 
 
 if __name__ == "__main__":
