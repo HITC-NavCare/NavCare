@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet: the Cloud Run deploy script and smoke test are in `deployment/` (see [Deploy to Cloud Run](#deploy-to-cloud-run)), and the first deploy waits for project-owner access (#18).
+The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). The service is public; API keys and rate limiting are not in place yet (#22). See [Deploy to Cloud Run](#deploy-to-cloud-run).
 
 ## Folders
 
@@ -211,7 +211,7 @@ cost nothing.
 
 ## Deploy to Cloud Run
 
-Target: dev service `navcare-api-dev` in `northamerica-northeast1` (not deployed yet), run as `navcare-run`; the Maps key comes from Secret Manager.
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key comes from Secret Manager.
 
 - `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
 - Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
