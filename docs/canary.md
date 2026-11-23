@@ -16,9 +16,9 @@ The facade (`app/api/facade.py`) picks an engine for each request at random. `V2
 1. **Drive-time cache is merged and deployed.** Without it, one run costs more than the spend limit (see "Cost of one run").
 2. **v1 comparison run passes.** The check that v2 picks hospitals similar to v1's needs both answers for the same request. That only works with `X-Engine`, so it runs once **before** the canary, on a dev revision with `ENGINE_HEADER_ENABLED=true`, never in the canary itself:
    ```
-   python -m loadtest.run --url <dev-service-url> --engine v2 --rate 12 --max-requests 25 --yes
+   python -m loadtest.run --url <dev-service-url> --engine v2 --rate 12 --duration 125 --max-requests 25 --min-percent 96 --yes
    ```
-   This sends the 25 scenarios once each, to v2. For the 5 with no message, it also sends the same request to v1 and compares them. **Pass: at most 1 problem in total from the correctness checker.**
+   This sends the 25 scenarios once each, to v2. For the 5 with no message, it also sends the same request to v1 and compares them. **Pass: at most 1 problem in total from the correctness checker** (1 out of 25 = 96 %, so `--min-percent 96` makes the command's PASS/FAIL and exit code match this rule). `--duration 125` is needed: the script sends `min(--max-requests, rate × duration / 60)` requests, so the default 60 s would send only 12.
 3. The Cloud Run request timeout is at least 120 s, longer than the agent's 60 s cap plus the v1 fallback. The load test's client timeout is 90 s.
 
 ## Where the numbers come from
@@ -33,7 +33,7 @@ The facade (`app/api/facade.py`) picks an engine for each request at random. `V2
 **How requests are counted (from the log lines):**
 
 - A request **went to v2** when its log line has `engine` `v2` or `v1_fallback`.
-- A **v2 failure** is a log line with `engine: "v1_fallback"`, or with `engine: "v2"` and `status` 500 or above.
+- A **v2 failure** is a log line with `engine: "v1_fallback"`, or with `engine: "v2"` and `status` 500. A `503` is `data_unavailable`: a shared data service (routing, weather or ER status) failed, and v1 gets the same 503s, so it is **not** counted as a v2 failure (see criterion 1).
 - Lines with `engine: "v1"` are the control group. They get the same load at the same time.
 - A **client timeout** (status `0` in `results.jsonl`) can't be tied to an engine, because the server never answered. It only counts in criterion 2.
 
@@ -41,12 +41,12 @@ The facade (`app/api/facade.py`) picks an engine for each request at random. `V2
 
 | # | Metric | How it is measured | Threshold | Action when violated |
 | --- | --- | --- | --- | --- |
-| 1 | **v2 failure rate** (availability) | v2 failures ÷ requests that went to v2, from Cloud Logging. A fallback is a v2 failure, even though the person still got an answer. | ≤ 5 %. In a step with fewer than 20 v2 requests: at most 1 failure. | Rollback |
-| 2 | **User-facing error rate** | Responses with status 500+ or a client timeout ÷ all requests, both engines, from `results.jsonl`. Fallbacks are not errors for the person. | ≤ 1 %, or at most 1 more error than in the 0 % baseline step | Rollback |
-| 3 | **v2 p95 latency** | 95th percentile of `latency_ms` on `engine: "v2"` lines | ≤ 30 s (a typical run is about 16 s; the agent's hard cap is 60 s) | Rollback |
+| 1 | **v2 failure rate** (availability) | v2 failures ÷ requests that went to v2, from Cloud Logging. A fallback is a v2 failure, even though the person still got an answer. 503 `data_unavailable` lines are left out of both counts. | ≤ 5 %. In a step with fewer than 20 v2 requests: at most 1 failure. | Rollback. If the step also has 503s (any engine), **hold and investigate** first: a shared data service is failing, not v2 |
+| 2 | **User-facing error rate** | Responses with status 500+ or a client timeout ÷ all requests, both engines, from `results.jsonl`. Fallbacks are not errors for the person. | ≤ 1 % **and** at most 1 error more than in the 0 % baseline step (both must hold) | Rollback |
+| 3 | **v2 p95 latency** | 95th percentile of `latency_ms` on lines with `engine` `v2` **or `v1_fallback`** (the same requests as criterion 1, without 503s). Fallbacks are included because they are usually the slowest: a request that hits the agent's 60 s limit is logged as `v1_fallback`. | ≤ 30 s (a typical run is about 16 s; the agent's hard cap is 60 s) | Rollback |
 | 4 | **v1 p95 latency** (control) | Same, on `engine: "v1"` lines | ≤ 5 s | Hold and investigate: if v1 is slow too, the problem is the shared data services, not v2 |
 | 5 | **Correctness and data consistency** | Correctness checker on the step's `results.jsonl`: schema, real hospital ids, numbers that add up, radius, specialised-ER rules, `call_911` on emergency phrases. The v1 comparison is done before the canary, not here. | v2 ≥ 95 % (in a step with fewer than 20 v2 answers: at most 1 wrong), and v1 = 100 % | v2 too low: rollback. v1 below 100 %: hold (it's a checker or data problem, not a v2 one) |
-| 6 | **v2 model cost per request** | Average Gemini cost from `model_usage` tokens × the Vertex AI price per token (#26), over v2 requests | ≤ $0.03 (measured: $0.01 to $0.03) | Rollback |
+| 6 | **v2 model cost per request** | Average Gemini cost from `model_usage` tokens × the Vertex AI price per token (#26), over lines with `engine` `v2` **and `v1_fallback`** (a fallback still paid for the Gemini calls it made before failing) | ≤ $0.05. Measured: $0.01 to $0.03, so this leaves room for heavier messages (French, longer text) without a false rollback; criterion 7 still caps total spend | Rollback |
 | 7 | **Total spend** | Billing report for the project since the canary started, and the budget alerts | Under $40 (the 80 % budget alert). Any budget alert email = violated | Rollback and **stop** the canary |
 
 A step is **promoted only if every criterion passes** and the minimum number of v2 requests was reached.
