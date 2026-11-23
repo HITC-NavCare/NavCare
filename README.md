@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet (Cloud Run is next).
+The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet: the Cloud Run deploy script and smoke test are in `deployment/` (see [Deploy to Cloud Run](#deploy-to-cloud-run)), and the first deploy waits for project-owner access (#18).
 
 ## Folders
 
@@ -147,6 +147,9 @@ messages (none, a child with a fever in French, a mental-health crisis, chest pa
 each answer as it arrives, with its client-side latency, to `loadtest/results/` (ignored by Git) in the checker's
 format, so a run stopped with Ctrl-C keeps what it already sent. It prints the error rate (non-200s, timeouts,
 connection errors and 200s that aren't JSON) and p50/p95 latency per engine, then runs the correctness checker.
+It also prints a `v2-routed` line for [canary criterion 1](docs/canary.md): v2 failures, counting v1 fallbacks,
+over the requests that went to v2 (503s, timeouts and connection errors left out). With `--engine split` a non-200
+doesn't say which engine failed, so the request logs stay the source for that criterion.
 
 With `--engine v2`, it also asks v1 the same question for v2 answers without a message, so the checker can
 compare them. With `--engine split` that is off by default: production ignores `X-Engine`, so the "v1" request
@@ -155,18 +158,42 @@ would go through the split again and add unplanned traffic to the canary. `--com
 ```bash
 # Against a local server (start it with ENGINE_HEADER_ENABLED=true to force an engine)
 python -m loadtest.run --engine v1 --rate 30 --duration 60 --max-requests 20
-# A canary step on Cloud Run: the split decides, as for real users
-python -m loadtest.run --url https://<service-url> --engine split --rate 30 --duration 600 --max-requests 300 --yes
+# A canary step on Cloud Run (docs/canary.md): 12/min for 10 min = 120 requests; the split decides
+python -m loadtest.run --url https://<service-url> --engine split --rate 12 --duration 600 --max-requests 120 --no-compare --yes
 ```
 
 Every request uses the real paid services, even against a local server: the Routes API is billed per
-origin-hospital pair (up to 15 per request, more when v2 searches twice) and each v2 request makes up to 8
-Gemini calls. So `--max-requests` caps the load requests (default 20), the plan printed first also counts the
-v1 comparison requests, a run of more than 20 requests in all or one against a server that is not local needs
-`--yes`, and `--dry-run` prints the plan without sending anything. Options are checked before anything is sent
-(`--radius-km` 1–200, `--min-percent` 0–100). Estimate the cost of a step before running it. `--engine v1`/`v2`
-needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the header was ignored. The exit code is the
-checker's (`--min-percent` is passed to it), 1 when the run was interrupted, or 2 when it did not start.
+origin-hospital pair and each v2 request makes up to 8 Gemini calls. So `--max-requests` caps the load requests
+(default 20), and the plan printed first also counts the v1 comparison requests and the most Routes elements the
+run can use, with no drive-time cache: 15 per v1 request, up to 45 per v2 request (2 searches of 15, plus 15 if it
+falls back to v1), and for `split` as if every request went to v2. For the canary step above that is 5,400
+elements, up to $54 once the 5,000 free ones of the month are used, which is why [docs/canary.md](docs/canary.md)
+requires the drive-time cache first. A run of more than 20 requests in all or one against a server that is not
+local needs `--yes`, and `--dry-run` prints the plan without sending anything. Options are checked before
+anything is sent (`--radius-km` 1–200, `--min-percent` 0–100). The default client timeout (130 s) is longer than
+Cloud Run's (120 s), so a request the service gives up on shows as its 504, not as a client timeout.
+`--engine v1`/`v2` needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the header was ignored.
+The exit code is the checker's (`--min-percent` is passed to it), 1 when the run was interrupted, or 2 when it
+did not start.
+
+### Fault injection (canary demo)
+
+Makes v2 fail or slow down on purpose ([fault_injection.py](app/agent_v2/fault_injection.py)). Set only by
+environment variables; off by default; affects only requests routed to v2 (and `python main.py v2`).
+
+- Needs both `V2_FAULT_ENABLED=true` and a `V2_FAULT_MODE`; either alone does nothing.
+- `error`: v2 fails before calling Gemini; v1 answers with HTTP 200, `engine: "v1_fallback"` and a WARNING log line. The canary must count `v1_fallback` as a v2 failure.
+- `slow`: v2 waits `V2_FAULT_SLOW_SECONDS` (default 35, max 60), using up part of the agent's 60 s Gemini budget, then runs. The wait is in `latency_ms`. A slow 200 is likely but not guaranteed: if the budget runs out, v2 falls back to v1.
+- The budget is not a deadline for the whole request: tool calls and the v1 fallback can run past it.
+- Unknown mode means off; an invalid wait uses 35. Each distinct setting, and an active fault, is logged once.
+- Each waiting request holds a worker thread from a shared pool (40 by default). Enough of them at once make all other requests queue.
+
+```bash
+# Local: set both in .env and restart uvicorn; remove them and restart to stop.
+# Cloud Run (each change creates a new revision):
+gcloud run services update <service> --update-env-vars V2_FAULT_ENABLED=true,V2_FAULT_MODE=error                # on
+gcloud run services update <service> --remove-env-vars V2_FAULT_ENABLED,V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+```
 
 ## v2 AI agent
 
@@ -216,6 +243,16 @@ Setup (once per machine):
 
 Model calls are billed to the project (covered by the trial credit while it lasts). Tests fake Gemini, so they
 cost nothing.
+
+## Deploy to Cloud Run
+
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (not deployed yet), run as `navcare-run`; the Maps key comes from Secret Manager.
+
+- `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
+- Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
+- `V2_TRAFFIC_PERCENT=0` is set only when the service is created, so a redeploy keeps the canary share. Fault injection stays off. `ENGINE_HEADER_ENABLED` is off unless set to `true` for a controlled dev test; turn it off again afterwards (`gcloud run services update navcare-api-dev --region=northamerica-northeast1 --update-env-vars=ENGINE_HEADER_ENABLED=false`).
+- The script never changes who can call the service. The first deploy needs two project-owner steps: give Cloud Build's default service account `roles/cloudbuild.builds.builder` (the organization blocks automatic grants), and after a private smoke test give `allUsers` `roles/run.invoker` on the service.
+- Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
 
 ## Hospital and ER data
 

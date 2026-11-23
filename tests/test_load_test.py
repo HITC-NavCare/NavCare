@@ -2,6 +2,8 @@
 API in memory (with routing, ER status and weather faked) or to a fake transport."""
 
 import json
+import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -115,7 +117,27 @@ def test_dry_run_sends_nothing(tmp_path, capsys):
                     transport=transport) == 0
     output = capsys.readouterr().out
     assert "Plan: 500 requests to http://localhost:8000" in output
-    assert f"up to {nearest_hospital_getter.MAX_CANDIDATES} origin-hospital pairs" in output
+    # split: as if all 500 went to v2, at 45 elements each
+    assert "Routes API: at most 22,500 billed elements" in output
+    assert "up to $225.00 once the 5,000 free elements" in output
+
+
+@pytest.mark.parametrize("extra, elements", [
+    (["--engine", "v1", "--max-requests", "120"], 120 * 15),
+    (["--engine", "v2", "--max-requests", "25"], 25 * 45 + 5 * 15),  # plus 5 v1 comparisons
+    (["--engine", "split", "--max-requests", "120"], 120 * 45),  # the canary step: 5,400
+])
+def test_plan_shows_the_most_routes_elements(tmp_path, extra, elements):
+    args = run.parse_args(args_for(tmp_path, *extra))
+    assert run.max_routes_elements(args, *run.plan(args)) == elements
+    assert run.V1_MAX_ROUTES_ELEMENTS == nearest_hospital_getter.MAX_CANDIDATES == 15
+    assert run.V2_MAX_ROUTES_ELEMENTS == 45  # 2 searches + the v1 fallback
+
+
+def test_client_timeout_is_longer_than_the_cloud_run_timeout():
+    deploy = (Path(__file__).resolve().parents[1] / "deployment" / "deploy.sh").read_text()
+    service_timeout = int(re.search(r"--timeout=(\d+)", deploy).group(1))
+    assert run.DEFAULT_TIMEOUT_S > service_timeout
 
 
 @pytest.mark.parametrize("option, value", [
@@ -178,7 +200,7 @@ def test_timeouts_and_errors_are_recorded_as_non_200(tmp_path, capsys):
             return httpx.Response(503, json={"error": {"code": "data_unavailable"}})
         if count == 3:
             return httpx.Response(200, text="<html>not json</html>")
-        return httpx.Response(200, json={"engine": "v2"}, headers={"X-Engine-Served": "v2"})
+        return httpx.Response(200, json={"engine": "v2"})
 
     result = run.main(args_for(tmp_path, "--engine", "v2", "--max-requests", "4", "--no-check",
                                "--no-compare"), transport=httpx.MockTransport(handler))
@@ -194,6 +216,9 @@ def test_timeouts_and_errors_are_recorded_as_non_200(tmp_path, capsys):
     # The 200 that is not JSON has no engine: counted under the forced engine, as a failure
     assert ("v2: 4 requests, 3 failed (75.0%: 1 non-200, 1 timeouts, 0 connection errors, "
             "1 200s that are not JSON)") in output
+    # Criterion 1 leaves out the 503 and the timeout
+    assert ("v2-routed (canary criterion 1): 2 requests, 1 failed including 0 v1 fallbacks "
+            "(50.0%)") in output
 
 
 def test_connection_errors_are_not_called_timeouts(tmp_path, capsys):
@@ -241,12 +266,11 @@ def test_a_bug_in_one_request_does_not_lose_the_others(tmp_path, capsys):
     assert "1 requests failed in the load test itself" in output.out
 
 
-def test_served_engine_header_wins_over_the_body():
-    response = httpx.Response(200, headers={"X-Engine-Served": "v2"})
-    assert run.served_engine(response, {"engine": "v1"}) == "v2"
-    assert run.served_engine(httpx.Response(200), {"engine": "v1_fallback"}) == "v1_fallback"
-    assert run.served_engine(httpx.Response(200), {"engine": 3}) is None
-    assert run.served_engine(httpx.Response(200), None) is None
+def test_served_engine_comes_from_the_body():
+    assert run.served_engine({"engine": "v1_fallback"}) == "v1_fallback"
+    assert run.served_engine({"engine": 3}) is None
+    assert run.served_engine({"engine": ""}) is None
+    assert run.served_engine(None) is None
 
 
 def test_warns_when_the_server_ignores_x_engine(tmp_path, capsys):
@@ -290,6 +314,26 @@ def test_summary_counts_200s_under_the_engine_that_answered():
     assert summary["v1_fallback"]["requests"] == 1
     assert summary["v1"]["requests"] == 1
     assert summary["unknown"]["non_200"] == 1  # split: the error body has no engine
+
+
+def test_v2_routed_counts_fallbacks_as_v2_failures():
+    def record(status, served, forced=None, failure=None):
+        base = {"status": status, "served_engine": served, "latency_ms": 100}
+        if failure:
+            base["failure"] = failure
+        return {**base, "engine": forced} if forced else base
+
+    routed = run.v2_routed([
+        record(200, "v2", "v2"), record(200, "v1_fallback", "v2"),
+        record(500, None, "v2"), record(200, None, "v2", "bad_body"),
+        record(200, "v2"), record(200, "v1_fallback"),  # split: the body says v2 was used
+        record(503, None, "v2"), record(0, None, "v2", "timeout"),  # left out
+        record(0, None, "v2", "connection"),  # left out
+        record(200, "v1"), record(500, None),  # not v2 (or not known to be)
+    ])
+    assert routed == {"requests": 6, "failed": 4, "fallbacks": 2,
+                      "failure_rate_percent": 66.7}
+    assert run.v2_routed([record(200, "v1", "v1"), record(503, None, "v2")]) is None
 
 
 # End to end: the real API in memory, then the correctness checker on the results

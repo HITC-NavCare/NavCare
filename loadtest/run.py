@@ -8,11 +8,11 @@ error rate and p50/p95 latency per engine, then runs the correctness checker on 
     python -m loadtest.run --url http://localhost:8000 --engine v1 --rate 30 --duration 60
 
 Cost: every request uses the real paid services, even against a local server. The Routes API
-is billed per origin-hospital pair (up to MAX_CANDIDATES per request, more when v2 widens its
-search), and v2 makes up to MAX_MODEL_CALLS Gemini calls. So --max-requests caps the run
-(default 20), the plan printed first counts every request including v1 comparisons, and a run
-of more than SAFE_MAX_REQUESTS in all, or against a server that is not local, needs --yes.
---dry-run prints the plan and sends nothing.
+is billed per origin-hospital pair, and v2 makes up to MAX_MODEL_CALLS Gemini calls. So
+--max-requests caps the run (default 20), the plan printed first counts every request including
+v1 comparisons and the most Routes elements they can use, and a run of more than
+SAFE_MAX_REQUESTS in all, or against a server that is not local, needs --yes. --dry-run prints
+the plan and sends nothing.
 
 Engines: --engine v1 or v2 forces one with the X-Engine header, which the server honours only
 where ENGINE_HEADER_ENABLED=true. --engine split sends no header, so the canary split
@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS
+from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS, MAX_ROUTE_SEARCHES
 from app.services.nearest_hospital_getter import MAX_CANDIDATES
 
 RECOMMENDATIONS_PATH = "/v1/recommendations"
@@ -51,15 +51,20 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 SAFE_MAX_REQUESTS = 20
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
-# The API answers within about 60 s for v2, plus the v1 fallback.
-DEFAULT_TIMEOUT_S = 90.0
+# Longer than Cloud Run's request timeout (120 s, deployment/deploy.sh): a request the service
+# gives up on is then its 504 in the results, which says the server failed, not a client timeout.
+DEFAULT_TIMEOUT_S = 130.0
 
 # The API's limits for radius_km (app/api/main.py): outside them every request gets a 422.
 MIN_RADIUS_KM, MAX_RADIUS_KM = 1, 200
 
-# If the API stops returning `engine` in the body (so clients cannot tell the versions apart),
-# it can still say which engine answered in this header where ENGINE_HEADER_ENABLED=true.
-ENGINE_SERVED_HEADER = "X-Engine-Served"
+# Most Routes API elements (billed origin-hospital pairs) one request can use, with no
+# drive-time cache. v1: one route matrix of up to MAX_CANDIDATES. v2: up to MAX_ROUTE_SEARCHES of
+# them, plus one more when it falls back to v1 (orchestrator.build_agent_recommendations).
+V1_MAX_ROUTES_ELEMENTS = MAX_CANDIDATES
+V2_MAX_ROUTES_ELEMENTS = (MAX_ROUTE_SEARCHES + 1) * MAX_CANDIDATES
+# Routes price per 1,000 elements once the 5,000 free ones of the month are used (docs/canary.md).
+ROUTES_USD_PER_1000 = 10
 
 # Places across Québec: a dense city (Montréal has more ERs within 50 km than MAX_CANDIDATES),
 # mid-size cities and a rural area with few ERs.
@@ -120,14 +125,26 @@ def is_local(url):
     return urlsplit(url).hostname in LOCAL_HOSTS
 
 
+def max_routes_elements(args, total, comparisons):
+    """The most Routes elements this run can use. With split, as if every request went to v2."""
+    per_request = V1_MAX_ROUTES_ELEMENTS if args.engine == "v1" else V2_MAX_ROUTES_ELEMENTS
+    return total * per_request + comparisons * V1_MAX_ROUTES_ELEMENTS
+
+
 def describe_plan(args, total, comparisons):
     compare = (f" plus up to {comparisons} v1 requests to compare v2 answers without a "
                "message," if comparisons else "")
+    elements = max_routes_elements(args, total, comparisons)
+    split = "; split: as if every request went to v2" if args.engine == "split" else ""
     return (
         f"Plan: {total} requests to {args.url} (engine: {args.engine}) at {args.rate:g}/min "
         f"for up to {args.duration:g} s,{compare} timeout {args.timeout:g} s.\n"
-        f"Each request uses the Routes API for up to {MAX_CANDIDATES} origin-hospital pairs "
-        f"(v2 can search twice), and each v2 request up to {MAX_MODEL_CALLS} Gemini calls."
+        f"Routes API: at most {elements:,} billed elements, with no drive-time cache "
+        f"(v1: {V1_MAX_ROUTES_ELEMENTS} per request; v2: up to {V2_MAX_ROUTES_ELEMENTS}, "
+        f"{MAX_ROUTE_SEARCHES} searches of {MAX_CANDIDATES} plus {MAX_CANDIDATES} if it falls "
+        f"back to v1{split}). That is up to ${elements * ROUTES_USD_PER_1000 / 1000:,.2f} once "
+        f"the 5,000 free elements of the month are used (${ROUTES_USD_PER_1000} per 1,000).\n"
+        f"Gemini: up to {MAX_MODEL_CALLS} calls per v2 request."
     )
 
 
@@ -136,12 +153,11 @@ def needs_confirmation(args, total, comparisons):
     return total + comparisons > SAFE_MAX_REQUESTS or not is_local(args.url)
 
 
-def served_engine(response, body):
-    """The engine that answered: the header if the API sends it, else the body's `engine`."""
-    engine = response.headers.get(ENGINE_SERVED_HEADER)
-    if not engine and isinstance(body, dict) and isinstance(body.get("engine"), str):
-        engine = body["engine"]
-    return engine or None
+def served_engine(body):
+    """The engine that answered, from the body's `engine` (v1, v2 or v1_fallback), or None."""
+    if isinstance(body, dict) and isinstance(body.get("engine"), str) and body["engine"]:
+        return body["engine"]
+    return None
 
 
 async def send(client, request, forced_engine, timeout):
@@ -173,7 +189,7 @@ async def send(client, request, forced_engine, timeout):
         result["error"] = "the response is not JSON"
         if response.status_code == 200:
             result["failure"] = "bad_body"
-    result["engine"] = served_engine(response, result["body"])
+    result["engine"] = served_engine(result["body"])
     return result
 
 
@@ -265,9 +281,9 @@ def summarise(records):
 
     Failed: a non-200, no answer at all (timeout or connection error), or a 200 whose body is
     not JSON. A 200 is counted under the engine that answered (v1_fallback is separate from
-    v2). Anything else under the forced engine if there was one, else "unknown": the split
-    decides on the server, and an error body does not say which engine failed (the request
-    logs do).
+    v2; v2_routed puts them together). Anything else under the forced engine if there was one,
+    else "unknown": the split decides on the server, and an error body does not say which
+    engine failed (the request logs do).
     """
     rows = defaultdict(lambda: {"requests": 0, "non_200": 0, "timeouts": 0,
                                 "connection_errors": 0, "bad_bodies": 0, "latencies": []})
@@ -300,6 +316,36 @@ def summarise(records):
             "p95_ms": percentile(row["latencies"], 95),
         }
     return summary
+
+
+def v2_routed(records):
+    """Criterion 1 of docs/canary.md: v2 failures over the requests that went to v2, or None.
+
+    Went to v2: a 200 from v2 or v1_fallback, or any answer to a request forced to v2. Failed:
+    a v1 fallback (the person got an answer, but v2 failed), a non-200 or a 200 that is not JSON.
+    Left out of both counts, as in the criterion: 503s (a shared data service failed, and v1
+    gets them too) and timeouts or connection errors (no answer, so no engine; criterion 2
+    counts them). With --engine split a non-200 does not say which engine failed, so only the
+    request logs give the full count there.
+    """
+    requests = failed = fallbacks = 0
+    for record in records:
+        status = record["status"]
+        served = record.get("served_engine") if status == 200 else None
+        went_to_v2 = served in ("v2", "v1_fallback") or record.get("engine") == "v2"
+        if (not went_to_v2 or status == 503
+                or record.get("failure") in ("timeout", "connection")):
+            continue
+        requests += 1
+        if served == "v1_fallback":
+            fallbacks += 1
+            failed += 1
+        elif status != 200 or record.get("failure") == "bad_body":
+            failed += 1
+    if not requests:
+        return None
+    return {"requests": requests, "failed": failed, "fallbacks": fallbacks,
+            "failure_rate_percent": round(100 * failed / requests, 1)}
 
 
 def header_warnings(records):
@@ -336,6 +382,12 @@ def print_summary(records):
                  f"{row['bad_bodies']} 200s that are not JSON"]
         print(f"{engine}: {row['requests']} requests, {row['failed']} failed "
               f"({row['error_rate_percent']}%: {', '.join(kinds)}), p50 {p50}, p95 {p95}")
+    routed = v2_routed(records)
+    if routed:
+        print(f"v2-routed (canary criterion 1): {routed['requests']} requests, "
+              f"{routed['failed']} failed including {routed['fallbacks']} v1 fallbacks "
+              f"({routed['failure_rate_percent']}%); 503s, timeouts and connection errors "
+              "left out")
     for warning in header_warnings(records):
         print(f"\nWarning: {warning}")
 
@@ -393,8 +445,9 @@ def parse_args(argv):
                         help=f"most load requests to send (default {SAFE_MAX_REQUESTS}); "
                              "v1 comparison requests come on top and are shown in the plan")
     parser.add_argument("--timeout", type=positive_number, default=DEFAULT_TIMEOUT_S,
-                        help=f"seconds before a request counts as a timeout "
-                             f"(default {DEFAULT_TIMEOUT_S:g})")
+                        help=f"seconds before a request counts as a timeout (default "
+                             f"{DEFAULT_TIMEOUT_S:g}, longer than Cloud Run's 120 s, so a "
+                             "request the service gives up on is its 504, not a timeout)")
     parser.add_argument("--limit", type=int, choices=range(1, 11), metavar="1-10",
                         help="recommendations per answer (default: the API's, 4). Below 4 "
                              "the v1 comparison gets stricter")
