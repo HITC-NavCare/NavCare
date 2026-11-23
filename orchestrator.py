@@ -3,6 +3,7 @@ import logging
 
 from app import red_flags
 from app.agent_v2 import ai_agent_recommender as agent
+from app.agent_v2 import fault_injection
 from app.recommender_v1 import rules_based_recommender as recommender
 from app.services.hospital_status_getter import get_er_data
 from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM, get_candidate_hospitals
@@ -74,7 +75,8 @@ def build_agent_recommendations(
     Raises RuntimeError if the fallback's data services fail too.
     """
     try:
-        result = agent.run_agent(user_lat, user_lon, message, limit)
+        started = fault_injection.apply_fault()  # off unless enabled; slow mode's wait start
+        result = agent.run_agent(user_lat, user_lon, message, limit, started=started)
     except Exception as error:
         if isinstance(error, agent.AgentError):
             reason = str(error)

@@ -483,6 +483,25 @@ def test_a_call_only_gets_the_time_that_is_left(services, monkeypatch):
     assert client.requests[1]["config"].http_options.timeout == 12_000
 
 
+def test_time_limit_can_start_before_the_agent(services, monkeypatch):
+    # Slow fault injection passes when its wait began, so the wait uses up the limit.
+    monkeypatch.setattr(agent.time, "monotonic", lambda: 100.0)
+    client = FakeClient(turn(FIND), turn(submit(("A", "Closest."))))
+
+    agent.run_agent(45.5, -73.6, client=client, started=100.0 - (agent.MAX_TOTAL_SECONDS - 5))
+
+    assert client.requests[0]["config"].http_options.timeout == 5_000
+
+
+def test_no_call_is_made_when_the_limit_is_already_used_up(services, monkeypatch):
+    monkeypatch.setattr(agent.time, "monotonic", lambda: 100.0)
+    client = FakeClient(turn(FIND))
+
+    with pytest.raises(agent.AgentError, match="did not finish within 60 seconds"):
+        agent.run_agent(45.5, -73.6, client=client, started=100.0 - agent.MAX_TOTAL_SECONDS)
+    assert client.requests == []
+
+
 def api_error(code):
     return errors.APIError(code, {"error": {"code": code, "message": "failed", "status": "X"}})
 
