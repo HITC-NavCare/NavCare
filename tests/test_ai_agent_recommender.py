@@ -293,7 +293,48 @@ def test_model_usage_is_recorded(services):
         "tool_calls": 4,
         "prompt_tokens": 300,
         "output_tokens": 75,  # includes thinking tokens
+        "calls_without_usage": 0,
+        "failed_calls": 0,
     }
+
+
+def test_answers_without_token_counts_are_counted(services):
+    # Usage still adds up what was reported, and says how many answers reported nothing.
+    no_metadata = turn(STATUS)
+    no_metadata.usage_metadata = None
+    no_prompt_count = turn(WEATHER, prompt_tokens=None)
+    client = FakeClient(turn(FIND), no_metadata, no_prompt_count, turn(submit(("A", "Closest."))))
+
+    usage = agent.run_agent(45.5, -73.6, client=client)["model_usage"]
+
+    assert usage["model_calls"] == 4
+    assert usage["calls_without_usage"] == 2
+    assert usage["prompt_tokens"] == 200  # only the two answers that reported it
+    assert usage["output_tokens"] == 75  # 25 each from the three answers that reported it
+
+
+def test_usage_of_a_failed_run_keeps_the_missing_count(services):
+    no_metadata = turn(FIND)
+    no_metadata.usage_metadata = None
+    client = FakeClient(no_metadata, ConnectionError("no network"))
+
+    with pytest.raises(agent.AgentError) as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+
+    assert raised.value.model_usage["calls_without_usage"] == 1
+    assert raised.value.model_usage["failed_calls"] == 1  # the ConnectionError
+    assert raised.value.model_usage["prompt_tokens"] == 0
+
+
+def test_a_failed_call_after_a_good_one_is_counted(services):
+    # The timed-out call may still be billed, so its usage is unknown, not zero.
+    client = FakeClient(turn(FIND), TimeoutError("read timed out"))
+
+    with pytest.raises(agent.AgentError) as raised:
+        agent.run_agent(45.5, -73.6, client=client)
+
+    usage = raised.value.model_usage
+    assert (usage["model_calls"], usage["failed_calls"], usage["prompt_tokens"]) == (2, 1, 100)
 
 
 # --- tools: limits and failures ------------------------------------------------------
@@ -514,6 +555,7 @@ def test_temporary_gemini_error_is_retried_once(services):
     assert len(client.requests) == 3
     assert len(result["recommendations"]) == 1
     assert result["model_usage"]["model_calls"] == 3  # the failed attempt counts too
+    assert result["model_usage"]["failed_calls"] == 1
 
 
 @pytest.mark.parametrize(
@@ -532,6 +574,7 @@ def test_gemini_errors_that_end_the_run(services, replies, requests_made):
         agent.run_agent(45.5, -73.6, client=client)
     assert len(client.requests) == requests_made
     assert raised.value.model_usage["model_calls"] == requests_made
+    assert raised.value.model_usage["failed_calls"] == requests_made  # every call failed
 
 
 def test_retries_count_towards_the_model_call_limit(services):
