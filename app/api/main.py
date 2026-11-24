@@ -8,7 +8,7 @@ for each request, and `engine` in the response says which one did.
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -31,8 +31,6 @@ load_dotenv()
 configure_logging()
 
 MONTREAL = ZoneInfo("America/Montreal")
-# Cloud Billing days start at midnight US and Canadian Pacific Time, so prices use that day.
-PRICE_DATE_ZONE = ZoneInfo("America/Los_Angeles")
 # Every response has these fields, whichever engine answered. v1 cannot fill them.
 V2_ONLY_FIELDS = {"call_911": None, "note": None, "model_usage": None}
 
@@ -67,13 +65,13 @@ def model_cost_fields(engine, model_usage, now=None):
 
     model_cost_usd when the estimate is known, otherwise model_cost_unknown with the reason, so
     missing estimates can be counted. Prices and rules are in app/cost_estimates.py.
-    The price date is the Cloud Billing day (PRICE_DATE_ZONE). now: an aware datetime (tests).
+    The estimator prices a timestamp on its Cloud Billing day (Pacific). now: for tests.
     """
     if engine not in ("v2", "v1_fallback"):
         return {}
     location = os.environ.get(LOCATION_ENV_VAR, DEFAULT_LOCATION)  # as the agent reads it
-    day = (now or datetime.now(PRICE_DATE_ZONE)).astimezone(PRICE_DATE_ZONE)
-    estimate = cost_estimates.estimate_gemini_cost(model_usage, location, day)
+    now = now or datetime.now(timezone.utc)
+    estimate = cost_estimates.estimate_gemini_cost(model_usage, location, now)
     if estimate["estimated_usd"] is None:
         return {"model_cost_unknown": estimate["unknown_reason"]}
     return {"model_cost_usd": estimate["estimated_usd"]}

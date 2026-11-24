@@ -1,5 +1,5 @@
 {
-  "displayName": "NavCare canary (v1 vs v2)",
+  "displayName": "NavCare canary: __SERVICE__",
   "mosaicLayout": {
     "columns": 48,
     "tiles": [
@@ -9,10 +9,10 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "How to read this dashboard",
+          "title": "How to read this dashboard (__SERVICE__)",
           "text": {
             "format": "MARKDOWN",
-            "content": "- Each point covers the previous 10 minutes (one canary step). No traffic shows a gap, not a pass.\n- Went to v2: engine `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out (docs/canary.md).\n- The v2 failure rate is drawn only from 20 v2 requests; below that, criterion 1 is the failure count (at most 1).\n- Cost is an *estimated model-token cost* (Gemini only, no Routes or Cloud Run). It is drawn only when every estimate in the window is known; unknown estimates are counted next to it.\n- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not from this dashboard."
+            "content": "- Each point covers the 10 minutes before it (one canary step): read a step at its end time. No traffic shows a gap, not a pass.\n- Counts come from PromQL `increase()`, which extrapolates and can be fractional (for example 19.6 or 1.2), so the 20-request and 1-failure lines are approximate. The step check (`loadtest/step_check.py`) counts log lines exactly and makes the decision.\n- Went to v2: engine `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3 (docs/canary.md).\n- Cost is an *estimated model-token cost* (Gemini only, no Routes or Cloud Run) over every line that went to v2, as criterion 6 says. A 503 or 500 on v2 may follow paid Gemini calls but logs no usage, so its cost is unknown, as is a failed or token-less model call. The known average is always drawn: as *complete* when nothing in the step is unknown, otherwise as *INCOMPLETE: hold*, which is not a pass. Unknown counts by status are next to it.\n- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not from this dashboard."
           }
         }
       },
@@ -27,7 +27,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (engine) (increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "sum by (engine) (increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "{{engine}}",
@@ -53,7 +53,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "100 * (sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\"}[10m])) or vector(0)) / sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "100 * (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\"}[10m])) or vector(0)) / sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "v2 share",
@@ -74,12 +74,12 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "Criterion 1: v2 failure rate (%), shown from 20 v2 requests",
+          "title": "Criterion 1: v2 failure rate (%), shown from about 20 v2 requests",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "100 * ((sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=\"v2\",status=\"500\"}[10m])) or vector(0))) / sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) and on() (sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) >= 20)"
+                  "prometheusQuery": "100 * ((sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v2\",status=\"500\"}[10m])) or vector(0))) / sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) and on() (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) >= 20)"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "v2 failure rate",
@@ -108,12 +108,12 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "Criterion 1 (small steps): v2 failures",
+          "title": "Criterion 1 (small steps): v2 failures (approx.)",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "((sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=\"v2\",status=\"500\"}[10m])) or vector(0))) and on() (sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) > 0)"
+                  "prometheusQuery": "((sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v2\",status=\"500\"}[10m])) or vector(0))) and on() (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) > 0)"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "v2 failures",
@@ -142,12 +142,12 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "Requests that went to v2 (without 503s)",
+          "title": "Requests that went to v2 (without 503s, approx.)",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m]))"
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "went to v2",
@@ -181,7 +181,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user_navcare_latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\"}[10m])))"
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user___PREFIX___latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\"}[10m])))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "v2 p95",
@@ -215,7 +215,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user_navcare_latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v1\"}[10m])))"
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user___PREFIX___latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v1\"}[10m])))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "v1 p95",
@@ -244,15 +244,23 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "Criterion 6: estimated model-token cost per v2 request (USD, known estimates only)",
+          "title": "Criterion 6: estimated model-token cost per v2 request (USD, known estimates)",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "(sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m]))) and on() ((sum(increase(logging_googleapis_com:user_navcare_model_cost_unknown{monitored_resource=\"cloud_run_revision\"}[10m])) or vector(0)) == 0)"
+                  "prometheusQuery": "(sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m]))) and on() ((sum(increase(logging_googleapis_com:user___PREFIX___model_cost_unknown{monitored_resource=\"cloud_run_revision\"}[10m])) or vector(0)) == 0)"
                 },
                 "plotType": "LINE",
-                "legendTemplate": "average estimate",
+                "legendTemplate": "complete: every estimate known",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "(sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m]))) and on() (sum(increase(logging_googleapis_com:user___PREFIX___model_cost_unknown{monitored_resource=\"cloud_run_revision\"}[10m])) > 0)"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "INCOMPLETE: hold (some estimates unknown)",
                 "targetAxis": "Y1"
               }
             ],
@@ -278,12 +286,12 @@
         "width": 24,
         "height": 16,
         "widget": {
-          "title": "Cost estimates: known vs unknown (requests that went to v2)",
+          "title": "Cost estimates: known vs unknown by status (requests that went to v2)",
           "xyChart": {
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "known",
@@ -291,10 +299,10 @@
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_model_cost_unknown{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "sum by (status) (increase(logging_googleapis_com:user___PREFIX___model_cost_unknown{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
-                "legendTemplate": "unknown",
+                "legendTemplate": "unknown, status {{status}}",
                 "targetAxis": "Y1"
               }
             ],
@@ -317,7 +325,7 @@
             "dataSets": [
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_prompt_tokens_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user_navcare_prompt_tokens_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user___PREFIX___prompt_tokens_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___prompt_tokens_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "prompt",
@@ -325,7 +333,7 @@
               },
               {
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_output_tokens_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user_navcare_output_tokens_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user___PREFIX___output_tokens_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___output_tokens_count{monitored_resource=\"cloud_run_revision\"}[10m]))"
                 },
                 "plotType": "LINE",
                 "legendTemplate": "output",

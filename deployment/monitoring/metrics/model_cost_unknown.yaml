@@ -1,0 +1,15 @@
+description: Requests that went to v2 whose model-token cost is unknown (reason in model_cost_unknown), by status.
+filter: >-
+  resource.type="cloud_run_revision" AND resource.labels.service_name="__SERVICE__" AND jsonPayload.event="recommendation" AND jsonPayload.model_cost_unknown:*
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  labels:
+    - key: engine
+      valueType: STRING
+    - key: status
+      valueType: STRING
+labelExtractors:
+  engine: EXTRACT(jsonPayload.engine)
+  status: EXTRACT(jsonPayload.status)

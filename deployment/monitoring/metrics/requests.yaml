@@ -1,6 +1,6 @@
 description: Recommendation requests (one log line each), by engine and status.
 filter: >-
-  resource.type="cloud_run_revision" AND resource.labels.service_name="navcare-api-dev" AND jsonPayload.event="recommendation"
+  resource.type="cloud_run_revision" AND resource.labels.service_name="__SERVICE__" AND jsonPayload.event="recommendation"
 metricDescriptor:
   metricKind: DELTA
   valueType: INT64

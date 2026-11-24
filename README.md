@@ -259,13 +259,14 @@ Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 202
 
 ## Canary dashboard
 
-`deployment/monitoring/` defines the log-based metrics and the Cloud Monitoring dashboard for the canary criteria in [docs/canary.md](docs/canary.md).
+`deployment/monitoring/` holds templates for the log-based metrics and the Cloud Monitoring dashboard for the canary criteria in [docs/canary.md](docs/canary.md).
 
-- `deployment/monitoring/apply.sh` creates them, or updates them in place (the dashboard with its current etag). Same sign-in as `deploy.sh`. Metrics only count log lines written after they exist.
-- Charts use 10-minute windows (one canary step): traffic per engine, v2 failure rate (criterion 1), v2 and v1 p95 latency (3, 4), estimated model-token cost (6) and tokens.
-- Went to v2: `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out.
-- No traffic shows a gap, not a pass. The failure rate is drawn only from 20 v2 requests; below that, use the failure count (at most 1).
-- Cost covers Gemini tokens only (no Routes or Cloud Run). The line is drawn only when every estimate in the window is known; unknown estimates are counted next to it.
+- `deployment/monitoring/apply.sh` creates them for one service (default `navcare-api-dev`), or updates them in place (the dashboard with its current etag). Same sign-in as `deploy.sh`. Metrics only count log lines written after they exist.
+- Another service gets its own metrics and dashboard: `SERVICE=navcare-api-prod deployment/monitoring/apply.sh`. Names start with the service (`navcare_api_dev_requests`, dashboard "NavCare canary: navcare-api-dev"); the script refuses a metric that reads another service.
+- Charts use 10-minute windows (one canary step), read at the step's end time: traffic per engine, v2 failure rate (criterion 1), v2 and v1 p95 latency (3, 4), estimated model-token cost (6) and tokens.
+- Went to v2: `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3.
+- No traffic shows a gap, not a pass. Counts come from `increase()`, which extrapolates and can be fractional, so the 20-request and 1-failure lines are approximate; `loadtest/step_check.py` counts exactly and decides.
+- Cost covers Gemini tokens only, over every line that went to v2 (criterion 6). A v2 503 or 500, a failed model call or one without token counts has an unknown cost. The known average is drawn as "complete", or as "INCOMPLETE: hold" when anything in the step is unknown; unknown counts by status are next to it.
 - Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not the dashboard.
 
 ## Hospital and ER data

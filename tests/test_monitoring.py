@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -20,17 +21,31 @@ from app.api.main import app
 
 REPO = Path(__file__).resolve().parents[1]
 MONITORING = REPO / "deployment" / "monitoring"
-METRICS = {path.stem: yaml.safe_load(path.read_text(encoding="utf-8"))
-           for path in sorted((MONITORING / "metrics").glob("*.yaml"))}
-DASHBOARD = json.loads((MONITORING / "dashboard.json").read_text(encoding="utf-8"))
+SERVICE = "navcare-api-dev"  # apply.sh's default
+
+
+def render(text, service=SERVICE):
+    """What apply.sh does to a template before sending it."""
+    return text.replace("__SERVICE__", service).replace("__PREFIX__", service.replace("-", "_"))
+
+
+TEMPLATES = {path.stem: path.read_text(encoding="utf-8")
+             for path in sorted((MONITORING / "metrics").glob("*.yaml"))}
+METRICS = {f"navcare_api_dev_{stem}": yaml.safe_load(render(text))
+           for stem, text in TEMPLATES.items()}
+DASHBOARD_TEMPLATE = (MONITORING / "dashboard.json").read_text(encoding="utf-8")
+DASHBOARD = json.loads(render(DASHBOARD_TEMPLATE))
 CHARTS = {tile["widget"]["title"]: tile["widget"] for tile in DASHBOARD["mosaicLayout"]["tiles"]}
 BASE_FILTER = ('resource.type="cloud_run_revision" AND resource.labels.service_name='
                '"navcare-api-dev" AND jsonPayload.event="recommendation"')
+COST_TITLE = "Criterion 6: estimated model-token cost per v2 request (USD, known estimates)"
+COUNTS_TITLE = "Cost estimates: known vs unknown by status (requests that went to v2)"
 MONTREAL = {"lat": 45.5017, "lon": -73.5673}
 USAGE = {"model": agent.DEFAULT_MODEL, "model_calls": 3, "tool_calls": 4,
-         "prompt_tokens": 4628, "output_tokens": 1508, "calls_without_usage": 0}
+         "prompt_tokens": 4628, "output_tokens": 1508, "calls_without_usage": 0,
+         "failed_calls": 0}
 V1_RESULT = {"data_updated_at": "2026-11-13T12:00", "recommendations": []}
-client = TestClient(app)
+client = TestClient(app, raise_server_exceptions=False)  # a 500 is answered, as in production
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +65,7 @@ def log_line(monkeypatch, caplog, engine="v2", usage=USAGE, fail=None):
 
     monkeypatch.setattr(orchestrator, "build_agent_recommendations", build)
     monkeypatch.setattr(orchestrator, "build_recommendations", lambda *a, **k: dict(V1_RESULT))
+    caplog.clear()
     caplog.set_level("INFO", logger="navcare")
     client.get("/v1/recommendations", params=MONTREAL,
                headers={"X-Engine": "v1" if engine == "v1" else "v2"})
@@ -64,8 +80,7 @@ def log_line(monkeypatch, caplog, engine="v2", usage=USAGE, fail=None):
 def test_known_cost_comes_from_the_estimator(monkeypatch, caplog):
     fields = log_line(monkeypatch, caplog)
 
-    expected = cost_estimates.estimate_gemini_cost(USAGE, "global",
-                                                   datetime.now(main.PRICE_DATE_ZONE))
+    expected = cost_estimates.estimate_gemini_cost(USAGE, "global", datetime.now(timezone.utc))
     assert fields["model_cost_usd"] == pytest.approx(expected["estimated_usd"])
     assert "model_cost_unknown" not in fields
 
@@ -80,7 +95,6 @@ def test_price_day_is_the_cloud_billing_day_in_pacific_time(utc_time, price_day)
 
     expected = cost_estimates.estimate_gemini_cost(USAGE, "global", price_day)["estimated_usd"]
     assert fields["model_cost_usd"] == pytest.approx(expected)
-    assert main.PRICE_DATE_ZONE.key == "America/Los_Angeles"
 
 
 def test_the_price_change_shows_at_pacific_midnight():
@@ -98,7 +112,8 @@ def test_v1_lines_have_no_cost_fields(monkeypatch, caplog):
 
 @pytest.mark.parametrize(("engine", "usage", "reason"), [
     ("v1_fallback", None, "no model usage recorded"),  # e.g. no model call was made
-    ("v2", {**USAGE, "calls_without_usage": 1}, "1 of 3 model calls reported no tokens"),
+    ("v2", {**USAGE, "calls_without_usage": 1}, "1 of 3 model calls have unknown usage"),
+    ("v2", {**USAGE, "failed_calls": 1}, "1 of 3 model calls have unknown usage (1 failed"),
     ("v2", {**USAGE, "prompt_tokens": 0, "output_tokens": 0}, "3 model calls but no tokens"),
 ])
 def test_unknown_cost_is_logged_with_its_reason_never_as_zero(monkeypatch, caplog, engine, usage,
@@ -109,10 +124,15 @@ def test_unknown_cost_is_logged_with_its_reason_never_as_zero(monkeypatch, caplo
     assert fields["model_cost_unknown"].startswith(reason)
 
 
-def test_a_v2_503_counts_as_an_unknown_cost(monkeypatch, caplog):
-    fields = log_line(monkeypatch, caplog, fail=RuntimeError("Route request failed"))
+@pytest.mark.parametrize(("fail", "status"), [
+    (RuntimeError("Route request failed"), 503),  # the fallback's data services failed
+    (KeyError("bug"), 500),
+])
+def test_v2_errors_log_an_unknown_cost(monkeypatch, caplog, fail, status):
+    # Gemini may already have been paid for, but these paths log no model usage.
+    fields = log_line(monkeypatch, caplog, fail=fail)
 
-    assert (fields["status"], fields["engine"]) == (503, "v2")
+    assert (fields["status"], fields["engine"]) == (status, "v2")
     assert fields["model_cost_unknown"] == "no model usage recorded"
 
 
@@ -124,44 +144,133 @@ def test_an_unpriced_location_is_unknown(monkeypatch, caplog):
     assert fields["model_cost_unknown"].startswith("no known price for model")
 
 
-# Metric definitions
+# Metric definitions, and what they count from real log lines
+
+
+def matches(log_filter, fields, service=SERVICE):
+    """Evaluate one of our metric filters (AND of simple clauses) on a log line's fields."""
+    for clause in log_filter.split(" AND "):
+        name, op, value = re.match(r"(\S+?)(:\*|!=|>=|=)(.*)", clause.strip()).groups()
+        if name == "resource.type":
+            ok = value == '"cloud_run_revision"'
+        elif name == "resource.labels.service_name":
+            ok = value == f'"{service}"'
+        else:
+            found = fields
+            for key in name.removeprefix("jsonPayload.").split("."):
+                found = found.get(key) if isinstance(found, dict) else None
+            if op == ":*":
+                ok = found is not None
+            elif op == "=":
+                ok = str(found) == value.strip('"')
+            elif op == "!=":
+                ok = found is not None and str(found) != value.strip('"')
+            else:  # >=
+                ok = isinstance(found, (int, float)) and found >= float(value)
+        if not ok:
+            return False
+    return True
+
+
+def labels(metric, fields):
+    return tuple(str(fields[extractor[len("EXTRACT(jsonPayload."):-1]])
+                 for extractor in metric["labelExtractors"].values())
+
+
+def count(lines, stem):
+    """Lines a metric would count, by its labels (one log line, one count)."""
+    metric = METRICS[f"navcare_api_dev_{stem}"]
+    return Counter(labels(metric, f) for f in lines if matches(metric["filter"], f))
+
+
+def cost_chart_state(lines):
+    """What the criterion 6 chart draws for one step, following its query gates."""
+    known = sum(count(lines, "model_cost_usd").values())
+    unknown = sum(count(lines, "model_cost_unknown").values())
+    if not known:
+        return "no average"
+    return "INCOMPLETE: hold" if unknown else "complete"
+
+
+def unknown_by_status(lines):
+    by_status = Counter()
+    for (_, status), n in count(lines, "model_cost_unknown").items():
+        by_status[status] += n  # summed over engines, as the chart's `sum by (status)`
+    return dict(by_status)
 
 
 def test_every_metric_reads_this_services_recommendation_lines_by_engine():
-    assert set(METRICS) == {"navcare_requests", "navcare_latency_ms", "navcare_prompt_tokens",
-                            "navcare_output_tokens", "navcare_model_cost_usd",
-                            "navcare_model_cost_unknown"}
+    assert set(TEMPLATES) == {"requests", "latency_ms", "prompt_tokens", "output_tokens",
+                              "model_cost_usd", "model_cost_unknown"}
     for metric in METRICS.values():
         assert metric["filter"].startswith(BASE_FILTER)
         assert metric["labelExtractors"]["engine"] == "EXTRACT(jsonPayload.engine)"
+    for text in [*TEMPLATES.values(), DASHBOARD_TEMPLATE]:
+        assert "navcare-api-dev" not in text  # the service comes from apply.sh
 
 
 def test_metrics_only_use_fields_the_app_logs(monkeypatch, caplog):
-    lines = [log_line(monkeypatch, caplog)]
-    caplog.clear()
-    lines.append(log_line(monkeypatch, caplog, engine="v1_fallback", usage=None))
-
-    def has(fields, path):
-        for key in path.split("."):
-            if not isinstance(fields, dict) or key not in fields:
-                return False
-            fields = fields[key]
-        return True
-
+    lines = [log_line(monkeypatch, caplog),
+             log_line(monkeypatch, caplog, engine="v1_fallback", usage=None)]
     for name, metric in METRICS.items():
         text = " ".join([metric["filter"], metric.get("valueExtractor", ""),
                          *metric["labelExtractors"].values()])
         for path in re.findall(r"jsonPayload\.([\w.]+)", text):
-            assert any(has(line, path) for line in lines), f"{name}: {path} is never logged"
+            def has(fields, keys=path.split(".")):
+                for key in keys:
+                    if not isinstance(fields, dict) or key not in fields:
+                        return False
+                    fields = fields[key]
+                return True
+            assert any(has(line) for line in lines), f"{name}: {path} is never logged"
 
 
 def test_metrics_follow_the_canary_rules():
-    assert "status!=503" in METRICS["navcare_latency_ms"]["filter"]  # criteria 3 and 4
-    assert "model_cost_usd>=0" in METRICS["navcare_model_cost_usd"]["filter"]  # known only
-    assert "model_cost_unknown:*" in METRICS["navcare_model_cost_unknown"]["filter"]
-    assert {5000, 30000} <= set(
-        METRICS["navcare_latency_ms"]["bucketOptions"]["explicitBuckets"]["bounds"])
-    assert 0.05 in METRICS["navcare_model_cost_usd"]["bucketOptions"]["explicitBuckets"]["bounds"]
+    latency = METRICS["navcare_api_dev_latency_ms"]
+    assert "status!=503" in latency["filter"]  # criteria 3 and 4
+    assert {5000, 30000} <= set(latency["bucketOptions"]["explicitBuckets"]["bounds"])
+    cost = METRICS["navcare_api_dev_model_cost_usd"]
+    assert 0.05 in cost["bucketOptions"]["explicitBuckets"]["bounds"]
+    # Criterion 6 is over every line that went to v2: no status filter on either cost metric.
+    for stem in ("model_cost_usd", "model_cost_unknown"):
+        assert "status" not in METRICS[f"navcare_api_dev_{stem}"]["filter"]
+
+
+def scenario(monkeypatch, caplog, *kinds):
+    builders = {
+        "valid": lambda: log_line(monkeypatch, caplog),
+        "503": lambda: log_line(monkeypatch, caplog, fail=RuntimeError("Route request failed")),
+        "500": lambda: log_line(monkeypatch, caplog, fail=KeyError("bug")),
+        "no tokens": lambda: log_line(monkeypatch, caplog,
+                                      usage={**USAGE, "calls_without_usage": 1}),
+        "fallback": lambda: log_line(monkeypatch, caplog, engine="v1_fallback", usage=None),
+        "v1": lambda: log_line(monkeypatch, caplog, engine="v1", usage=None),
+    }
+    return [builders[kind]() for kind in kinds]
+
+
+@pytest.mark.parametrize(("kinds", "state", "unknown"), [
+    (["valid", "valid", "valid"], "complete", {}),
+    # A 503 keeps the known average visible, marked incomplete, and shows up as unknown.
+    (["valid", "valid", "503", "503"], "INCOMPLETE: hold", {"503": 2}),
+    (["valid", "valid", "500"], "INCOMPLETE: hold", {"500": 1}),
+    (["valid", "no tokens", "fallback"], "INCOMPLETE: hold", {"200": 2}),
+    (["503", "500"], "no average", {"503": 1, "500": 1}),  # everything unknown
+    (["v1", "v1"], "no average", {}),  # no eligible traffic
+])
+def test_criterion_6_from_real_log_lines(monkeypatch, caplog, kinds, state, unknown):
+    lines = scenario(monkeypatch, caplog, *kinds)
+
+    assert cost_chart_state(lines) == state
+    assert unknown_by_status(lines) == unknown
+    assert sum(count(lines, "model_cost_usd").values()) == kinds.count("valid")
+
+
+def test_criteria_1_and_3_still_leave_503s_out(monkeypatch, caplog):
+    lines = scenario(monkeypatch, caplog, "valid", "503", "500")
+
+    assert sum(count(lines, "latency_ms").values()) == 2  # the 503 is left out
+    assert count(lines, "requests") == {("v2", "200"): 1, ("v2", "503"): 1, ("v2", "500"): 1}
 
 
 # Dashboard
@@ -200,20 +309,19 @@ def test_thresholds_match_docs_canary_md():
     v2_p95_s = float(re.search(r"≤ (\d+) s", rows[3]).group(1))
     v1_p95_s = float(re.search(r"≤ (\d+) s", rows[4]).group(1))
     cost = float(re.search(r"≤ \$(\d+\.\d+)", rows[6]).group(1))
+    rate_title = "Criterion 1: v2 failure rate (%), shown from about 20 v2 requests"
 
-    assert thresholds("Criterion 1: v2 failure rate (%), shown from 20 v2 requests") == [rate]
-    assert thresholds("Criterion 1 (small steps): v2 failures") == [max_failures]
-    assert thresholds("Requests that went to v2 (without 503s)") == [small_step]
-    assert f">= {small_step})" in queries(
-        "Criterion 1: v2 failure rate (%), shown from 20 v2 requests")[0]
+    assert thresholds(rate_title) == [rate]
+    assert thresholds("Criterion 1 (small steps): v2 failures (approx.)") == [max_failures]
+    assert thresholds("Requests that went to v2 (without 503s, approx.)") == [small_step]
+    assert f">= {small_step})" in queries(rate_title)[0]
     assert thresholds("Criterion 3: v2 p95 latency (v2 and v1_fallback, ms)") == [v2_p95_s * 1000]
     assert thresholds("Criterion 4: v1 p95 latency (ms)") == [v1_p95_s * 1000]
-    assert thresholds("Criterion 6: estimated model-token cost per v2 request "
-                      "(USD, known estimates only)") == [cost]
+    assert thresholds(COST_TITLE) == [cost]
 
 
 def test_v2_failures_count_fallbacks_and_500s_over_v2_routed_requests_without_503s():
-    (rate,) = queries("Criterion 1: v2 failure rate (%), shown from 20 v2 requests")
+    (rate,) = queries("Criterion 1: v2 failure rate (%), shown from about 20 v2 requests")
     numerator, denominator = rate.split(" / ", 1)
     assert 'engine="v1_fallback",status!="503"' in numerator
     assert 'engine="v2",status="500"' in numerator
@@ -222,12 +330,12 @@ def test_v2_failures_count_fallbacks_and_500s_over_v2_routed_requests_without_50
 
 def test_no_traffic_never_draws_a_pass():
     # Zero failures are drawn only when some request went to v2; rates need traffic to divide by.
-    (failures,) = queries("Criterion 1 (small steps): v2 failures")
+    (failures,) = queries("Criterion 1 (small steps): v2 failures (approx.)")
     assert failures.endswith('engine=~"v2|v1_fallback",status!="503"}[10m])) > 0)')
     # Elsewhere a zero fallback must sit over a traffic count with none, so no traffic is a gap.
     # (A zero inside an `and on()` condition only hides a line, so it can't draw one.)
     for title, chart in CHARTS.items():
-        if "xyChart" in chart and title != "Criterion 1 (small steps): v2 failures":
+        if "xyChart" in chart and title != "Criterion 1 (small steps): v2 failures (approx.)":
             for query in queries(title):
                 drawn = query.split(" and on() ")[0]
                 if "vector(0)" in drawn:
@@ -244,84 +352,144 @@ def test_every_selector_names_the_monitored_resource():
                     assert 'monitored_resource="cloud_run_revision"' in selector, title
 
 
-def test_cost_chart_is_labelled_as_an_estimate_with_unknowns_shown():
-    assert any("estimated model-token cost" in title for title in CHARTS)
-    known_unknown = queries("Cost estimates: known vs unknown (requests that went to v2)")
-    assert any("model_cost_unknown" in q for q in known_unknown)
+def test_cost_average_stays_visible_and_is_marked_incomplete_when_any_cost_is_unknown():
+    complete, incomplete = CHARTS[COST_TITLE]["xyChart"]["dataSets"]
+    assert complete["legendTemplate"].startswith("complete")
+    assert incomplete["legendTemplate"].startswith("INCOMPLETE: hold")
+    average = "sum(increase(logging_googleapis_com:user_navcare_api_dev_model_cost_usd_sum"
+    unknown = "sum(increase(logging_googleapis_com:user_navcare_api_dev_model_cost_unknown"
+    complete_q = complete["timeSeriesQuery"]["prometheusQuery"]
+    incomplete_q = incomplete["timeSeriesQuery"]["prometheusQuery"]
+    assert complete_q.startswith(f"({average}") and incomplete_q.startswith(f"({average}")
+    # Exactly one of the two is drawn: no unknown, or some unknown.
+    assert complete_q.endswith(" or vector(0)) == 0)")
+    assert unknown in complete_q.split("and on()")[1]
+    assert incomplete_q.endswith(" > 0)") and unknown in incomplete_q.split("and on()")[1]
+    counts = queries(COUNTS_TITLE)
+    assert any(q.startswith("sum by (status) (increase(") and "model_cost_unknown" in q
+               for q in counts)
 
 
-def test_cost_average_is_hidden_while_any_estimate_is_unknown():
-    # A low average of the known ones must not look like a pass while others are unknown.
-    (average,) = queries("Criterion 6: estimated model-token cost per v2 request "
-                         "(USD, known estimates only)")
-    assert average.endswith('user_navcare_model_cost_unknown{monitored_resource='
-                            '"cloud_run_revision"}[10m])) or vector(0)) == 0)')
-
-
-def test_dashboard_name_matches_the_apply_script():
-    script = (MONITORING / "apply.sh").read_text(encoding="utf-8")
-    assert f'DASHBOARD_NAME="{DASHBOARD["displayName"]}"' in script
+def test_reading_note_explains_end_time_approximate_counts_and_incomplete_cost():
+    note = next(t["widget"]["text"]["content"] for t in DASHBOARD["mosaicLayout"]["tiles"]
+                if "text" in t["widget"])
+    for phrase in ("read a step at its end time", "can be fractional", "step_check.py",
+                   "INCOMPLETE: hold", "503 or 500"):
+        assert phrase in note
 
 
 # apply.sh with a fake gcloud (no cloud calls)
 
 FAKE_GCLOUD = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FAKE_LOG"
+keep() {  # keep each config that was sent, by the name of the file
+  for arg in "$@"; do
+    case "$arg" in
+      --config-from-file=*) cp "${arg#--config-from-file=}" "$FAKE_DIR/" ;;
+    esac
+  done
+}
 case "$*" in
-  *" logging metrics describe "*) exit "$FAKE_DESCRIBE_EXIT" ;;
-  *" monitoring dashboards list "*)
-    if [ "$FAKE_DESCRIBE_EXIT" = 0 ]; then echo "projects/1/dashboards/abc"; fi ;;
+  *" logging metrics describe "*)
+    [ "$FAKE_EXISTS" = 1 ] || exit 1
+    echo "resource.labels.service_name=\\"$FAKE_METRIC_SERVICE\\" AND more" ;;
+  *" monitoring dashboards list "*) printf '%s' "$FAKE_DASHBOARDS" ;;
   *" monitoring dashboards describe "*) printf '%s' "$FAKE_ETAG" ;;
-  *" monitoring dashboards "*)  # create or update: keep the config that was sent
-    for arg in "$@"; do
-      case "$arg" in
-        --config-from-file=*) cp "${arg#--config-from-file=}" "$FAKE_LOG.config" ;;
-      esac
-    done ;;
+  *" logging metrics "*|*" monitoring dashboards "*) keep "$@" ;;
 esac
 exit 0
 """
 BASH = shutil.which("bash") if os.name != "nt" or os.environ.get("MSYSTEM") else None
+needs_bash = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
 
 
-def apply(tmp_path, existing, etag="abc123"):
+def apply(tmp_path, service=None, exists=False, metric_service=SERVICE, dashboards="",
+          etag="abc123"):
     fake = tmp_path / "gcloud"
     fake.write_text(FAKE_GCLOUD, newline="\n")
     fake.chmod(0o755)
+    sent, temp = tmp_path / "sent", tmp_path / "tmp"
+    sent.mkdir()
+    temp.mkdir()
     log = tmp_path / "calls.log"
     env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
-           "FAKE_DESCRIBE_EXIT": "0" if existing else "1", "FAKE_ETAG": etag}
+           "FAKE_DIR": sent.as_posix(), "FAKE_EXISTS": "1" if exists else "0",
+           "FAKE_METRIC_SERVICE": metric_service, "FAKE_DASHBOARDS": dashboards,
+           "FAKE_ETAG": etag, "TMPDIR": temp.as_posix()}
     env.pop("PROJECT_ID", None)
+    env.pop("SERVICE", None)
+    if service:
+        env["SERVICE"] = service
     result = subprocess.run([BASH, "deployment/monitoring/apply.sh"], cwd=REPO, env=env,
                             capture_output=True, text=True, timeout=60)
-    sent = Path(f"{log}.config")
-    config = json.loads(sent.read_text(encoding="utf-8")) if sent.exists() else None
-    return result, log.read_text().splitlines(), config
+    calls = log.read_text().splitlines() if log.exists() else []
+    return result, calls, sent, temp
 
 
-@pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
-@pytest.mark.parametrize(("existing", "metric_verb", "dashboard_call"), [
-    (False, "create", "monitoring dashboards create --config-from-file="),
-    (True, "update", "monitoring dashboards update projects/1/dashboards/abc --config-from-file="),
-])
-def test_apply_creates_or_updates(tmp_path, existing, metric_verb, dashboard_call):
-    result, calls, config = apply(tmp_path, existing)
+@needs_bash
+@pytest.mark.parametrize(("exists", "verb"), [(False, "create"), (True, "update")])
+def test_apply_creates_or_updates_the_default_service(tmp_path, exists, verb):
+    dashboards = "projects/1/dashboards/abc" if exists else ""
+    result, calls, sent, temp = apply(tmp_path, exists=exists, dashboards=dashboards)
 
     assert result.returncode == 0, result.stderr
     assert all(c.startswith("--project=project-69a1b17d-f37d-485c-912 --quiet ") for c in calls)
-    for name in METRICS:
-        assert any(f"logging metrics {metric_verb} {name} --config-from-file=" in c
-                   and c.endswith(f"metrics/{name}.yaml") for c in calls)
-    assert sum(dashboard_call in c for c in calls) == 1
-    assert not any("dashboards delete" in c or "metrics delete" in c for c in calls)
-    # An update sends the current etag, as the API expects; a create must not send one.
-    assert config == ({"etag": "abc123", **DASHBOARD} if existing else DASHBOARD)
+    for name, metric in METRICS.items():
+        assert any(f"logging metrics {verb} {name} --config-from-file=" in c for c in calls)
+        assert yaml.safe_load((sent / f"{name}.yaml").read_text()) == metric
+    if exists:  # an update sends the current etag, as the API expects; a create none
+        assert json.loads((sent / "update.json").read_text()) == {"etag": "abc123", **DASHBOARD}
+    else:
+        assert json.loads((sent / "dashboard.json").read_text()) == DASHBOARD
+    assert not any("delete" in c for c in calls)
+    assert list(temp.iterdir()) == []  # the trap removed the temporary files
 
 
-@pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
+@needs_bash
+def test_another_service_gets_its_own_metrics_and_dashboard(tmp_path):
+    result, calls, sent, _ = apply(tmp_path, service="navcare-api-prod")
+
+    assert result.returncode == 0, result.stderr
+    names = {Path(p).stem for p in os.listdir(sent) if p.endswith(".yaml")}
+    assert names == {f"navcare_api_prod_{stem}" for stem in TEMPLATES}
+    for name in names:
+        assert 'service_name="navcare-api-prod"' in (sent / f"{name}.yaml").read_text()
+    prod = json.loads((sent / "dashboard.json").read_text())
+    assert prod == json.loads(render(DASHBOARD_TEMPLATE, "navcare-api-prod"))
+    assert prod["displayName"] == "NavCare canary: navcare-api-prod"
+    assert "navcare_api_dev" not in json.dumps(prod)
+    assert any('displayName="NavCare canary: navcare-api-prod"' in c for c in calls)
+
+
+@needs_bash
+def test_apply_refuses_a_metric_that_reads_another_service(tmp_path):
+    result, calls, _, _ = apply(tmp_path, exists=True, metric_service="navcare-api-prod")
+
+    assert result.returncode != 0 and "does not read navcare-api-dev" in result.stderr
+    assert not any("metrics update" in c or "metrics create" in c for c in calls)
+
+
+@needs_bash
+def test_apply_stops_when_two_dashboards_have_the_name(tmp_path):
+    two = "projects/1/dashboards/a\nprojects/1/dashboards/b"
+    result, calls, _, _ = apply(tmp_path, dashboards=two)
+
+    assert result.returncode != 0 and "2 dashboards are named" in result.stderr
+    assert not any("dashboards update" in c or "dashboards create" in c for c in calls)
+
+
+@needs_bash
 def test_apply_stops_instead_of_updating_without_an_etag(tmp_path):
-    result, calls, config = apply(tmp_path, existing=True, etag="")
+    result, calls, _, _ = apply(tmp_path, dashboards="projects/1/dashboards/abc", etag="")
 
     assert result.returncode != 0 and "No etag" in result.stderr
-    assert config is None
     assert not any("dashboards update" in c for c in calls)
+
+
+@needs_bash
+@pytest.mark.parametrize("service", ["Navcare", "navcare_api", "navcare-api-", "a/b"])
+def test_apply_rejects_a_bad_service_name(tmp_path, service):
+    result, calls, _, _ = apply(tmp_path, service=service)
+
+    assert result.returncode != 0 and "SERVICE must be a Cloud Run service name" in result.stderr
+    assert calls == []
