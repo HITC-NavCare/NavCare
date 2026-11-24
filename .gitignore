@@ -32,6 +32,9 @@ service-account*.json
 # data/hospitals.csv stays tracked.
 data/snapshots/
 
+# Load-test results (python -m loadtest.run): can be large, and are regenerated per run.
+loadtest/results/
+
 # Editor and OS files
 .idea/
 .vscode/
