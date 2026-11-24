@@ -341,7 +341,8 @@ def make_client():
 def _generate(client, model, contents, config, deadline, usage):
     """One Gemini call, retried once on a temporary error, never running past the deadline.
 
-    Every attempt is counted in usage["model_calls"], including ones that failed, and
+    Every attempt is counted in usage["model_calls"], including ones that failed (also in
+    usage["failed_calls"], since their usage is unknown), and
     retries count towards MAX_MODEL_CALLS too, so a request never makes more than that.
     """
     for attempt in range(1, RETRY_ATTEMPTS + 1):
@@ -360,10 +361,12 @@ def _generate(client, model, contents, config, deadline, usage):
                 model=model, contents=contents, config=timed_config
             )
         except errors.APIError as error:
+            usage["failed_calls"] += 1
             if error.code in RETRY_STATUS_CODES and attempt < RETRY_ATTEMPTS:
                 continue
             raise AgentError(f"Gemini request failed: {error}") from error
         except Exception as error:  # the SDK raises many types: auth, network, timeout
+            usage["failed_calls"] += 1
             raise AgentError(f"Gemini request failed: {error}") from error
 
 
@@ -388,6 +391,8 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
     usage = {
         "model": model, "model_calls": 0, "tool_calls": 0,
         "prompt_tokens": 0, "output_tokens": 0,
+        "calls_without_usage": 0,  # answers with no token counts: the totals are then too low
+        "failed_calls": 0,  # attempts that raised: may have been billed, so the totals may be low
     }
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
@@ -449,6 +454,9 @@ def _run_steps(client, model, contents, config, toolbox, limit, usage, started=N
 
 def _count_usage(usage, response):
     metadata = response.usage_metadata
+    # Every real call has prompt tokens, so a missing count means this answer's usage is unknown.
+    if metadata is None or metadata.prompt_token_count is None:
+        usage["calls_without_usage"] += 1
     if metadata is None:
         return
     usage["prompt_tokens"] += metadata.prompt_token_count or 0

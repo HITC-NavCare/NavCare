@@ -216,6 +216,8 @@ sounds life-threatening, and answers in French or English.
 - **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
   (model calls, tool calls and tokens for the request). Model calls include retried attempts, and
   `model_usage` is kept when v2 falls back, so the cost of every v2 request is recorded.
+  `calls_without_usage` (answers with no token counts) and `failed_calls` (calls that failed, possibly
+  still billed) mean the token totals may be too low, so the cost estimate is unknown.
 - **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
   data, and an id that was not returned by our services is rejected.
 - **Specialised ERs are checked too:** the model must say which specialised care the message shows is
