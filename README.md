@@ -115,7 +115,7 @@ In Swagger UI, `message` and `X-Engine` are fields on the same endpoint.
 and cost per request. Because the split happens inside the app, Cloud Run's own per-revision charts cannot tell v1
 from v2; the dashboard uses these lines. Fallbacks and errors are the same line at WARNING or ERROR, with the
 real error in `message`. Lines that went to v2 also carry `model_cost_usd` (estimated Gemini token cost, from
-[app/cost_estimates.py](app/cost_estimates.py)) or, when it can't be estimated, `model_cost_unknown` with the reason.
+[app/cost_estimates.py](app/cost_estimates.py), priced on the Cloud Billing day in Pacific Time) or, when it can't be estimated, `model_cost_unknown` with the reason.
 
 **Correctness for the canary.** A 200 can still be wrong, so [app/quality/correctness.py](app/quality/correctness.py)
 checks each response: it must match the response schema in `docs/openapi.yaml`, use real hospital ids whose
@@ -225,11 +225,11 @@ Target: dev service `navcare-api-dev` in `northamerica-northeast1` (not deployed
 
 `deployment/monitoring/` defines the log-based metrics and the Cloud Monitoring dashboard for the canary criteria in [docs/canary.md](docs/canary.md).
 
-- `deployment/monitoring/apply.sh` creates them, or updates them in place. Same sign-in as `deploy.sh`. Metrics only count log lines written after they exist.
+- `deployment/monitoring/apply.sh` creates them, or updates them in place (the dashboard with its current etag). Same sign-in as `deploy.sh`. Metrics only count log lines written after they exist.
 - Charts use 10-minute windows (one canary step): traffic per engine, v2 failure rate (criterion 1), v2 and v1 p95 latency (3, 4), estimated model-token cost (6) and tokens.
 - Went to v2: `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out.
 - No traffic shows a gap, not a pass. The failure rate is drawn only from 20 v2 requests; below that, use the failure count (at most 1).
-- Cost covers Gemini tokens only (no Routes or Cloud Run), from known estimates; unknown estimates are counted next to it.
+- Cost covers Gemini tokens only (no Routes or Cloud Run). The line is drawn only when every estimate in the window is known; unknown estimates are counted next to it.
 - Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not the dashboard.
 
 ## Hospital and ER data

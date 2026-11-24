@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -64,9 +64,30 @@ def log_line(monkeypatch, caplog, engine="v2", usage=USAGE, fail=None):
 def test_known_cost_comes_from_the_estimator(monkeypatch, caplog):
     fields = log_line(monkeypatch, caplog)
 
-    expected = cost_estimates.estimate_gemini_cost(USAGE, "global", datetime.now(main.MONTREAL))
+    expected = cost_estimates.estimate_gemini_cost(USAGE, "global",
+                                                   datetime.now(main.PRICE_DATE_ZONE))
     assert fields["model_cost_usd"] == pytest.approx(expected["estimated_usd"])
     assert "model_cost_unknown" not in fields
+
+
+@pytest.mark.parametrize(("utc_time", "price_day"), [
+    # 23:30 on Dec 31 in Pacific Time is already Jan 1 in UTC and in Montréal.
+    (datetime(2027, 1, 1, 7, 30, tzinfo=timezone.utc), date(2026, 12, 31)),
+    (datetime(2027, 1, 1, 8, 30, tzinfo=timezone.utc), date(2027, 1, 1)),
+])
+def test_price_day_is_the_cloud_billing_day_in_pacific_time(utc_time, price_day):
+    fields = main.model_cost_fields("v2", USAGE, now=utc_time)
+
+    expected = cost_estimates.estimate_gemini_cost(USAGE, "global", price_day)["estimated_usd"]
+    assert fields["model_cost_usd"] == pytest.approx(expected)
+    assert main.PRICE_DATE_ZONE.key == "America/Los_Angeles"
+
+
+def test_the_price_change_shows_at_pacific_midnight():
+    before = main.model_cost_fields("v2", USAGE, datetime(2027, 1, 1, 7, 59, tzinfo=timezone.utc))
+    after = main.model_cost_fields("v2", USAGE, datetime(2027, 1, 1, 8, 0, tzinfo=timezone.utc))
+
+    assert after["model_cost_usd"] == pytest.approx(2 * before["model_cost_usd"])
 
 
 def test_v1_lines_have_no_cost_fields(monkeypatch, caplog):
@@ -204,18 +225,37 @@ def test_no_traffic_never_draws_a_pass():
     (failures,) = queries("Criterion 1 (small steps): v2 failures")
     assert failures.endswith('engine=~"v2|v1_fallback",status!="503"}[10m])) > 0)')
     # Elsewhere a zero fallback must sit over a traffic count with none, so no traffic is a gap.
+    # (A zero inside an `and on()` condition only hides a line, so it can't draw one.)
     for title, chart in CHARTS.items():
         if "xyChart" in chart and title != "Criterion 1 (small steps): v2 failures":
             for query in queries(title):
-                if "vector(0)" in query:
-                    assert " / " in query, title
-                    assert "vector(0)" not in query.split(" / ", 1)[1], title
+                drawn = query.split(" and on() ")[0]
+                if "vector(0)" in drawn:
+                    assert " / " in drawn, title
+                    assert "vector(0)" not in drawn.split(" / ", 1)[1], title
+
+
+def test_every_selector_names_the_monitored_resource():
+    # Log-based metrics need it in PromQL (Cloud Monitoring's PromQL mapping docs).
+    for title, chart in CHARTS.items():
+        if "xyChart" in chart:
+            for query in queries(title):
+                for selector in re.findall(r"user_navcare_\w+(\{[^}]*\}|\[)", query):
+                    assert 'monitored_resource="cloud_run_revision"' in selector, title
 
 
 def test_cost_chart_is_labelled_as_an_estimate_with_unknowns_shown():
     assert any("estimated model-token cost" in title for title in CHARTS)
     known_unknown = queries("Cost estimates: known vs unknown (requests that went to v2)")
     assert any("model_cost_unknown" in q for q in known_unknown)
+
+
+def test_cost_average_is_hidden_while_any_estimate_is_unknown():
+    # A low average of the known ones must not look like a pass while others are unknown.
+    (average,) = queries("Criterion 6: estimated model-token cost per v2 request "
+                         "(USD, known estimates only)")
+    assert average.endswith('user_navcare_model_cost_unknown{monitored_resource='
+                            '"cloud_run_revision"}[10m])) or vector(0)) == 0)')
 
 
 def test_dashboard_name_matches_the_apply_script():
@@ -231,10 +271,32 @@ case "$*" in
   *" logging metrics describe "*) exit "$FAKE_DESCRIBE_EXIT" ;;
   *" monitoring dashboards list "*)
     if [ "$FAKE_DESCRIBE_EXIT" = 0 ]; then echo "projects/1/dashboards/abc"; fi ;;
+  *" monitoring dashboards describe "*) printf '%s' "$FAKE_ETAG" ;;
+  *" monitoring dashboards "*)  # create or update: keep the config that was sent
+    for arg in "$@"; do
+      case "$arg" in
+        --config-from-file=*) cp "${arg#--config-from-file=}" "$FAKE_LOG.config" ;;
+      esac
+    done ;;
 esac
 exit 0
 """
 BASH = shutil.which("bash") if os.name != "nt" or os.environ.get("MSYSTEM") else None
+
+
+def apply(tmp_path, existing, etag="abc123"):
+    fake = tmp_path / "gcloud"
+    fake.write_text(FAKE_GCLOUD, newline="\n")
+    fake.chmod(0o755)
+    log = tmp_path / "calls.log"
+    env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
+           "FAKE_DESCRIBE_EXIT": "0" if existing else "1", "FAKE_ETAG": etag}
+    env.pop("PROJECT_ID", None)
+    result = subprocess.run([BASH, "deployment/monitoring/apply.sh"], cwd=REPO, env=env,
+                            capture_output=True, text=True, timeout=60)
+    sent = Path(f"{log}.config")
+    config = json.loads(sent.read_text(encoding="utf-8")) if sent.exists() else None
+    return result, log.read_text().splitlines(), config
 
 
 @pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
@@ -243,22 +305,23 @@ BASH = shutil.which("bash") if os.name != "nt" or os.environ.get("MSYSTEM") else
     (True, "update", "monitoring dashboards update projects/1/dashboards/abc --config-from-file="),
 ])
 def test_apply_creates_or_updates(tmp_path, existing, metric_verb, dashboard_call):
-    fake = tmp_path / "gcloud"
-    fake.write_text(FAKE_GCLOUD, newline="\n")
-    fake.chmod(0o755)
-    log = tmp_path / "calls.log"
-    env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
-           "FAKE_DESCRIBE_EXIT": "0" if existing else "1"}
-    env.pop("PROJECT_ID", None)
-
-    result = subprocess.run([BASH, "deployment/monitoring/apply.sh"], cwd=REPO, env=env,
-                            capture_output=True, text=True, timeout=60)
+    result, calls, config = apply(tmp_path, existing)
 
     assert result.returncode == 0, result.stderr
-    calls = log.read_text().splitlines()
     assert all(c.startswith("--project=project-69a1b17d-f37d-485c-912 --quiet ") for c in calls)
     for name in METRICS:
         assert any(f"logging metrics {metric_verb} {name} --config-from-file=" in c
                    and c.endswith(f"metrics/{name}.yaml") for c in calls)
     assert sum(dashboard_call in c for c in calls) == 1
     assert not any("dashboards delete" in c or "metrics delete" in c for c in calls)
+    # An update sends the current etag, as the API expects; a create must not send one.
+    assert config == ({"etag": "abc123", **DASHBOARD} if existing else DASHBOARD)
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
+def test_apply_stops_instead_of_updating_without_an_etag(tmp_path):
+    result, calls, config = apply(tmp_path, existing=True, etag="")
+
+    assert result.returncode != 0 and "No etag" in result.stderr
+    assert config is None
+    assert not any("dashboards update" in c for c in calls)

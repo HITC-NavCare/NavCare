@@ -25,7 +25,12 @@ done
 id="$(gc monitoring dashboards list --filter="displayName=\"$DASHBOARD_NAME\"" \
   --format="value(name)" | head -n 1)"
 if [ -n "$id" ]; then
-  gc monitoring dashboards update "$id" --config-from-file="$DIR/dashboard.json"
+  # The API expects the current etag on update, so an edit made since then fails, not lost.
+  etag="$(gc monitoring dashboards describe "$id" --format="value(etag)")"
+  if [ -z "$etag" ]; then echo "No etag for $id; not updating." >&2; exit 1; fi
+  config="$(mktemp)"
+  sed "1s/^{/{\"etag\": \"$etag\",/" "$DIR/dashboard.json" > "$config"
+  gc monitoring dashboards update "$id" --config-from-file="$config"
 else
   gc monitoring dashboards create --config-from-file="$DIR/dashboard.json"
 fi
