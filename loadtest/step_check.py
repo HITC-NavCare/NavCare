@@ -13,6 +13,8 @@ Run it after every step, on that step's load-test results and its log lines from
   The log lines say which engine served every request, including errors, and give the server
   latency and the model cost. Without them, criteria 1 and 3 use the results alone (an error
   that does not say its engine leaves criterion 1 not checked), and criterion 6 is not checked.
+  Criterion 6 is also not checked (so hold) when any v2 request's cost is unknown, unless the
+  known costs alone are already over the limit.
 - --baseline: the 0 % step's results, for criterion 2 ("at most 1 error more than the baseline").
 
 Decision: ROLLBACK if any criterion whose action is rollback fails; else HOLD if one whose
@@ -304,13 +306,16 @@ def check_cost(rows, percent, have_logs):
     average = math.fsum(known) / len(known)
     cell = f"${average:.4f}"
     measured = f"{cell} over {len(known)}"
-    note = None
     if unknown:
         measured += f", {unknown} unknown"
-        note = (f"{unknown} v2 requests have no cost estimate (for example a failed model call) "
-                "and are left out of the average")
-    return criterion(6, name, PASS if average <= V2_MAX_COST_USD else FAIL, measured, threshold,
-                     ROLLBACK, note, cell)
+        cell += " (incomplete)"
+    if average > V2_MAX_COST_USD:  # over the limit on the known costs alone: roll back
+        return criterion(6, name, FAIL, measured, threshold, ROLLBACK, cell=cell)
+    if unknown:  # a pass on part of the requests is not a pass, as on the dashboard (#45)
+        return criterion(6, name, NOT_CHECKED, measured, threshold,
+                         note=f"{unknown} v2 requests have no cost estimate (for example a 503, a "
+                         "500 or a failed model call): hold and investigate", cell=cell)
+    return criterion(6, name, PASS, measured, threshold, cell=cell)
 
 
 def check_spend():

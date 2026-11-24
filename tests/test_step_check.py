@@ -219,11 +219,29 @@ def test_cost():
     _, by_number = check(*healthy(cost=0.06))
     assert by_number[6]["status"] == FAIL and by_number[6]["action"] == ROLLBACK
 
+    # Some costs unknown: the known average alone is not a pass, so hold (as the dashboard does).
     records, logs = step((108, {}), (11, {"engine": "v2", "cost": 0.02}),
                          (1, {"engine": "v1_fallback", "cost": None}))
-    _, by_number = check(records, logs)
-    assert by_number[6]["status"] == PASS
-    assert "1 unknown" in by_number[6]["measured"] and by_number[6]["note"]
+    result, by_number = check(records, logs)
+    assert by_number[6]["status"] == NOT_CHECKED and by_number[6]["action"] is None
+    assert "1 unknown" in by_number[6]["measured"] and "hold" in by_number[6]["note"]
+    assert "incomplete" in by_number[6]["cell"]
+    assert result["decision"] == HOLD
+    assert any(reason.startswith("criterion 6 not checked") for reason in result["reasons"])
+
+    # A v2 503 has an unknown cost too, so it holds criterion 6 even when criterion 1 passes.
+    records, logs = step((108, {}), (11, {"engine": "v2", "cost": 0.02}),
+                         (1, {"engine": "v2", "status": 503, "cost": None}))
+    result, by_number = check(records, logs)
+    assert by_number[1]["status"] == PASS
+    assert by_number[6]["status"] == NOT_CHECKED and result["decision"] == HOLD
+
+    # Over the limit on the known costs alone: still a rollback, whatever the unknown ones cost.
+    records, logs = step((108, {}), (11, {"engine": "v2", "cost": 0.06}),
+                         (1, {"engine": "v1_fallback", "cost": None}))
+    result, by_number = check(records, logs)
+    assert by_number[6]["status"] == FAIL and by_number[6]["action"] == ROLLBACK
+    assert result["decision"] == ROLLBACK
 
     records, logs = healthy()
     for line in logs.values():

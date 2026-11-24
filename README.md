@@ -242,7 +242,9 @@ budget alerts) by hand, the decision, the command to run next, and a row for the
   criterion 1 not checked), and criterion 6 is not checked. A local server's JSON log lines also work.
 - **Baseline** (`--baseline`): the 0 % step's results, needed for criterion 2 from step 1 on.
 - **Cost** (criterion 6) comes from `model_cost_usd` in the log lines, which needs a deployed revision with the
-  cost estimate (#41, #45). Until then it is NOT CHECKED, so the decision is at best HOLD.
+  cost estimate (#41, #45). Until then it is NOT CHECKED, so the decision is at best HOLD. It is also NOT
+  CHECKED (HOLD) when any v2 request has `model_cost_unknown` (a 503, a 500 or a failed model call), as the
+  dashboard's "INCOMPLETE: hold"; known costs over $0.05 on their own still mean ROLLBACK.
 - **Correctness:** a `v1_fallback` answer is v1's code, so it is held to v1's 100 %.
 
 For the demo's rollback: `canary.sh set 10`, `canary.sh fault error`, run the step, and the check reports
