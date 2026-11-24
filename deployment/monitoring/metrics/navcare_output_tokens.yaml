@@ -1,0 +1,18 @@
+description: model_usage.output_tokens per request that went to v2 (incomplete when calls_without_usage > 0).
+filter: >-
+  resource.type="cloud_run_revision" AND resource.labels.service_name="navcare-api-dev" AND jsonPayload.event="recommendation" AND jsonPayload.model_usage.output_tokens>=0
+valueExtractor: EXTRACT(jsonPayload.model_usage.output_tokens)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DISTRIBUTION
+  unit: "1"
+  labels:
+    - key: engine
+      valueType: STRING
+labelExtractors:
+  engine: EXTRACT(jsonPayload.engine)
+bucketOptions:
+  exponentialBuckets:
+    numFiniteBuckets: 20
+    growthFactor: 2
+    scale: 100

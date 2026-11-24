@@ -1,0 +1,345 @@
+{
+  "displayName": "NavCare canary (v1 vs v2)",
+  "mosaicLayout": {
+    "columns": 48,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "How to read this dashboard",
+          "text": {
+            "format": "MARKDOWN",
+            "content": "- Each point covers the previous 10 minutes (one canary step). No traffic shows a gap, not a pass.\n- Went to v2: engine `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out (docs/canary.md).\n- The v2 failure rate is drawn only from 20 v2 requests; below that, criterion 1 is the failure count (at most 1).\n- Cost is an *estimated model-token cost* (Gemini only, no Routes or Cloud Run), from known estimates only. Unknown estimates are counted next to it.\n- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not from this dashboard."
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 0,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Requests per engine (10 min)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (engine) (increase(logging_googleapis_com:user_navcare_requests[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "{{engine}}",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "requests",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 16,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Share of requests that went to v2 (%)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * (sum(increase(logging_googleapis_com:user_navcare_requests{engine=~\"v2|v1_fallback\"}[10m])) or vector(0)) / sum(increase(logging_googleapis_com:user_navcare_requests[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v2 share",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "%",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 16,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 1: v2 failure rate (%), shown from 20 v2 requests",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * ((sum(increase(logging_googleapis_com:user_navcare_requests{engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user_navcare_requests{engine=\"v2\",status=\"500\"}[10m])) or vector(0))) / sum(increase(logging_googleapis_com:user_navcare_requests{engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) and on() (sum(increase(logging_googleapis_com:user_navcare_requests{engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) >= 20)"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v2 failure rate",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "criterion 1: 5 %",
+                "value": 5,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "%",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 32,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 1 (small steps): v2 failures",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "((sum(increase(logging_googleapis_com:user_navcare_requests{engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user_navcare_requests{engine=\"v2\",status=\"500\"}[10m])) or vector(0))) and on() (sum(increase(logging_googleapis_com:user_navcare_requests{engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) > 0)"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v2 failures",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "fewer than 20 v2 requests: at most 1",
+                "value": 1,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "failures",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 32,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Requests that went to v2 (without 503s)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_requests{engine=~\"v2|v1_fallback\",status!=\"503\"}[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "went to v2",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "failure rate shown from 20",
+                "value": 20,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "requests",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 48,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 3: v2 p95 latency (v2 and v1_fallback, ms)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user_navcare_latency_ms_bucket{engine=~\"v2|v1_fallback\"}[10m])))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v2 p95",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "criterion 3: 30 s",
+                "value": 30000,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 48,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 4: v1 p95 latency (ms)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user_navcare_latency_ms_bucket{engine=~\"v1\"}[10m])))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v1 p95",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "criterion 4: 5 s",
+                "value": 5000,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 64,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 6: estimated model-token cost per v2 request (USD, known estimates only)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_sum[10m])) / sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_count[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "average estimate",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "criterion 6: $0.05",
+                "value": 0.05,
+                "color": "RED",
+                "direction": "ABOVE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "USD",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 64,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Cost estimates: known vs unknown (requests that went to v2)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_model_cost_usd_count[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "known",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_model_cost_unknown[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "unknown",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "requests",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 80,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Average tokens per v2 request",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_prompt_tokens_sum[10m])) / sum(increase(logging_googleapis_com:user_navcare_prompt_tokens_count[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "prompt",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase(logging_googleapis_com:user_navcare_output_tokens_sum[10m])) / sum(increase(logging_googleapis_com:user_navcare_output_tokens_count[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "output",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "tokens",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
