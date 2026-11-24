@@ -1,0 +1,17 @@
+description: Estimated model-token cost (USD) of requests that went to v2, known estimates only (criterion 6).
+filter: >-
+  resource.type="cloud_run_revision" AND resource.labels.service_name="__SERVICE__" AND jsonPayload.event="recommendation" AND jsonPayload.model_cost_usd>=0
+valueExtractor: EXTRACT(jsonPayload.model_cost_usd)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DISTRIBUTION
+  unit: USD
+  labels:
+    - key: engine
+      valueType: STRING
+labelExtractors:
+  engine: EXTRACT(jsonPayload.engine)
+# Edge at the threshold ($0.05).
+bucketOptions:
+  explicitBuckets:
+    bounds: [0.0025, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.2]

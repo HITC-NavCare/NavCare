@@ -6,8 +6,9 @@ for each request, and `engine` in the response says which one did.
 """
 
 import logging
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -18,7 +19,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 import orchestrator
-from app.agent_v2.ai_agent_recommender import MAX_MESSAGE_CHARS
+from app import cost_estimates
+from app.agent_v2.ai_agent_recommender import DEFAULT_LOCATION, LOCATION_ENV_VAR, MAX_MESSAGE_CHARS
 from app.api import facade
 from app.api.logs import configure_logging
 from app.recommender_v1 import rules_based_recommender as recommender
@@ -54,7 +56,25 @@ def log_recommendation(request, status, engine, level=logging.INFO, message="rec
         "chosen_by": getattr(request.state, "chosen_by", None),  # split or header
         "latency_ms": None if started is None else round((time.monotonic() - started) * 1000),
         "model_usage": model_usage,
+        **model_cost_fields(engine, model_usage),
     }})
+
+
+def model_cost_fields(engine, model_usage, now=None):
+    """Estimated model-token cost of a line that went to v2 (canary criterion 6), else nothing.
+
+    model_cost_usd when the estimate is known, otherwise model_cost_unknown with the reason, so
+    missing estimates can be counted. Prices and rules are in app/cost_estimates.py.
+    The estimator prices a timestamp on its Cloud Billing day (Pacific). now: for tests.
+    """
+    if engine not in ("v2", "v1_fallback"):
+        return {}
+    location = os.environ.get(LOCATION_ENV_VAR, DEFAULT_LOCATION)  # as the agent reads it
+    now = now or datetime.now(timezone.utc)
+    estimate = cost_estimates.estimate_gemini_cost(model_usage, location, now)
+    if estimate["estimated_usd"] is None:
+        return {"model_cost_unknown": estimate["unknown_reason"]}
+    return {"model_cost_usd": estimate["estimated_usd"]}
 
 app = FastAPI(
     title="NAVCare API",
