@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet (Cloud Run is next).
+The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet: the Cloud Run deploy script and smoke test are in `deployment/` (see [Deploy to Cloud Run](#deploy-to-cloud-run)), and the first deploy waits for project-owner access (#18).
 
 ## Folders
 
@@ -141,6 +141,25 @@ own to check (so a v2 that always fell back to v1 fails) and there are no bad re
 for an empty file; 2 when the file can't be opened.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
+### Fault injection (canary demo)
+
+Makes v2 fail or slow down on purpose ([fault_injection.py](app/agent_v2/fault_injection.py)). Set only by
+environment variables; off by default; affects only requests routed to v2 (and `python main.py v2`).
+
+- Needs both `V2_FAULT_ENABLED=true` and a `V2_FAULT_MODE`; either alone does nothing.
+- `error`: v2 fails before calling Gemini; v1 answers with HTTP 200, `engine: "v1_fallback"` and a WARNING log line. The canary must count `v1_fallback` as a v2 failure.
+- `slow`: v2 waits `V2_FAULT_SLOW_SECONDS` (default 35, max 60), using up part of the agent's 60 s Gemini budget, then runs. The wait is in `latency_ms`. A slow 200 is likely but not guaranteed: if the budget runs out, v2 falls back to v1.
+- The budget is not a deadline for the whole request: tool calls and the v1 fallback can run past it.
+- Unknown mode means off; an invalid wait uses 35. Each distinct setting, and an active fault, is logged once.
+- Each waiting request holds a worker thread from a shared pool (40 by default). Enough of them at once make all other requests queue.
+
+```bash
+# Local: set both in .env and restart uvicorn; remove them and restart to stop.
+# Cloud Run (each change creates a new revision):
+gcloud run services update <service> --update-env-vars V2_FAULT_ENABLED=true,V2_FAULT_MODE=error                # on
+gcloud run services update <service> --remove-env-vars V2_FAULT_ENABLED,V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+```
+
 ## v2 AI agent
 
 v2 takes the same location as v1 plus an optional message in the person's own words. Through the API
@@ -189,6 +208,16 @@ Setup (once per machine):
 
 Model calls are billed to the project (covered by the trial credit while it lasts). Tests fake Gemini, so they
 cost nothing.
+
+## Deploy to Cloud Run
+
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (not deployed yet), run as `navcare-run`; the Maps key comes from Secret Manager.
+
+- `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
+- Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
+- `V2_TRAFFIC_PERCENT=0` is set only when the service is created, so a redeploy keeps the canary share. Fault injection stays off. `ENGINE_HEADER_ENABLED` is off unless set to `true` for a controlled dev test; turn it off again afterwards (`gcloud run services update navcare-api-dev --region=northamerica-northeast1 --update-env-vars=ENGINE_HEADER_ENABLED=false`).
+- The script never changes who can call the service. The first deploy needs two project-owner steps: give Cloud Build's default service account `roles/cloudbuild.builds.builder` (the organization blocks automatic grants), and after a private smoke test give `allUsers` `roles/run.invoker` on the service.
+- Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
 
 ## Hospital and ER data
 
