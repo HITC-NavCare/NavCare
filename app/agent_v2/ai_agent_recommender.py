@@ -388,6 +388,7 @@ def run_agent(user_lat, user_lon, message=None, limit=recommender.DEFAULT_LIMIT,
     usage = {
         "model": model, "model_calls": 0, "tool_calls": 0,
         "prompt_tokens": 0, "output_tokens": 0,
+        "calls_without_usage": 0,  # answers with no token counts: the totals are then too low
     }
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
@@ -449,6 +450,9 @@ def _run_steps(client, model, contents, config, toolbox, limit, usage, started=N
 
 def _count_usage(usage, response):
     metadata = response.usage_metadata
+    # Every real call has prompt tokens, so a missing count means this answer's usage is unknown.
+    if metadata is None or metadata.prompt_token_count is None:
+        usage["calls_without_usage"] += 1
     if metadata is None:
         return
     usage["prompt_tokens"] += metadata.prompt_token_count or 0

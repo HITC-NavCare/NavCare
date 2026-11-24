@@ -580,6 +580,9 @@ components:
               type: integer
             output_tokens:
               type: integer
+            calls_without_usage:
+              type: integer
+              description: Model answers that reported no token counts. Above 0, the token totals are incomplete.
         data_updated_at:
           type: string
           format: date-time

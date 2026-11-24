@@ -5,11 +5,14 @@
   overestimate input cost.
 - Priced: gemini-3.8-flash, Vertex AI Standard PayGo, global endpoint, verified on
   VERTEX_PRICING_URL. Other models, locations and dates give unknown.
-- Missing or invalid usage, or no price for the model, location and date, gives None, never 0.
+- Missing, invalid or incomplete usage, or no price for the model, location and date, gives
+  None, never 0. A recorded zero (no model call) gives 0.
+- `on` is a date; a datetime counts as its own calendar date (in its own timezone, if any).
 """
 
 import math
-from datetime import date
+from collections import defaultdict
+from datetime import date, datetime
 
 VERTEX_PRICING_URL = "https://cloud.google.com/vertex-ai/generative-ai/pricing"
 TOKENS_PER_PRICE_UNIT = 1_000_000
@@ -30,11 +33,13 @@ GEMINI_PRICES = (
      "input_per_million": 1.50, "output_per_million": 7.50,
      "source": VERTEX_PRICING_URL, "checked_on": PRICES_CHECKED_ON},
 )
-TOKEN_FIELDS = ("prompt_tokens", "output_tokens")
+# Whole numbers in model_usage. calls_without_usage counts answers that reported no tokens.
+COUNT_FIELDS = ("model_calls", "calls_without_usage", "prompt_tokens", "output_tokens")
 
 
 def gemini_price(model, location, on, prices=GEMINI_PRICES):
     """The price row for a model and Vertex AI location on a date, or None if there is none."""
+    on = _as_date(on)
     for price in prices:
         if (price["model"], price["location"]) != (model, location):
             continue
@@ -52,8 +57,7 @@ def estimate_gemini_cost(model_usage, location, on, prices=GEMINI_PRICES):
     on is the date of the request, since prices change over time.
     Returns {"estimated_usd": float or None, "unknown_reason": str or None, "price": row or None}.
     """
-    if not isinstance(on, date):
-        raise TypeError("on must be a date")
+    on = _as_date(on)
     if model_usage is None:
         return _unknown("no model usage recorded")
     if not isinstance(model_usage, dict):
@@ -62,21 +66,26 @@ def estimate_gemini_cost(model_usage, location, on, prices=GEMINI_PRICES):
     model = model_usage.get("model")
     if not isinstance(model, str) or not model:
         return _unknown("model missing")
-    tokens = {}
-    for field in TOKEN_FIELDS:
+    counts = {}
+    for field in COUNT_FIELDS:
         value = model_usage.get(field)
         if value is None:
             return _unknown(f"{field} missing")
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return _unknown(f"{field} is not a whole number of tokens: {value!r}")
-        tokens[field] = value
+            return _unknown(f"{field} is not a whole number: {value!r}")
+        counts[field] = value
+    if counts["calls_without_usage"]:
+        return _unknown(f"{counts['calls_without_usage']} of {counts['model_calls']} model calls "
+                        "reported no tokens")
+    if counts["model_calls"] and not (counts["prompt_tokens"] or counts["output_tokens"]):
+        return _unknown(f"{counts['model_calls']} model calls but no tokens recorded")
 
     price = gemini_price(model, location, on, prices)
     if price is None:
         return _unknown(f"no known price for model {model!r} in {location!r} on {on.isoformat()}")
 
-    usd = (tokens["prompt_tokens"] * price["input_per_million"]
-           + tokens["output_tokens"] * price["output_per_million"]) / TOKENS_PER_PRICE_UNIT
+    usd = (counts["prompt_tokens"] * price["input_per_million"]
+           + counts["output_tokens"] * price["output_per_million"]) / TOKENS_PER_PRICE_UNIT
     return {"estimated_usd": usd, "unknown_reason": None, "price": price}
 
 
@@ -94,6 +103,36 @@ def summarize(estimates):
         "known_total_usd": total,
         "known_average_usd": total / len(known) if known else None,
     }
+
+
+def price_table_problems(prices=GEMINI_PRICES):
+    """Rows that end before they start, and overlapping rows for the same model and location.
+
+    from/until None means open-ended (from the start, or for good). An empty list means valid.
+    """
+    problems = []
+    groups = defaultdict(list)
+    for row in prices:
+        if row["from"] and row["until"] and row["until"] < row["from"]:
+            problems.append(f"{row['model']} in {row['location']}: ends {row['until']} "
+                            f"before it starts {row['from']}")
+        groups[(row["model"], row["location"])].append(row)
+    for (model, location), rows in groups.items():
+        rows.sort(key=lambda row: row["from"] or date.min)
+        for earlier, later in zip(rows, rows[1:]):
+            open_ended = earlier["until"] is None or later["from"] is None
+            if open_ended or earlier["until"] >= later["from"]:
+                problems.append(f"{model} in {location}: the rows from {earlier['from']} and "
+                                f"{later['from']} overlap")
+    return problems
+
+
+def _as_date(on):
+    if isinstance(on, datetime):  # also a date, but cannot be compared with one
+        return on.date()
+    if isinstance(on, date):
+        return on
+    raise TypeError(f"on must be a date or datetime, not {type(on).__name__}")
 
 
 def _unknown(reason):
