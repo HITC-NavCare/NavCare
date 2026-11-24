@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -7,7 +8,8 @@ from app.agent_v2 import ai_agent_recommender as agent
 
 DAY = date(2026, 11, 22)
 USAGE = {"model": "synthetic-model", "model_calls": 3, "tool_calls": 4,
-         "prompt_tokens": 10_000, "output_tokens": 2_000, "calls_without_usage": 0}
+         "prompt_tokens": 10_000, "output_tokens": 2_000, "calls_without_usage": 0,
+         "failed_calls": 0}
 ZERO = {**USAGE, "model_calls": 0, "prompt_tokens": 0, "output_tokens": 0}  # no model call
 # Synthetic prices for testing the arithmetic only. Not real Google prices.
 SYNTHETIC_PRICES = (
@@ -48,9 +50,17 @@ def test_no_model_call_costs_zero_for_a_priced_model():
     # All calls answered without token counts (the old agent recorded this as 0 tokens).
     ({**USAGE, "prompt_tokens": 0, "output_tokens": 0}, "3 model calls but no tokens recorded"),
     # Only some calls had counts: the totals are too low, so no partial estimate either.
-    ({**USAGE, "calls_without_usage": 1}, "1 of 3 model calls reported no tokens"),
-    # Recorded before calls_without_usage existed: completeness cannot be checked.
+    ({**USAGE, "calls_without_usage": 1},
+     "1 of 3 model calls have unknown usage (0 failed, 1 without token counts)"),
+    # A failed call may still have been billed: after a good call, or before a good retry.
+    ({**USAGE, "model_calls": 2, "failed_calls": 1},
+     "1 of 2 model calls have unknown usage (1 failed, 0 without token counts)"),
+    # Every call failed.
+    ({**USAGE, "model_calls": 2, "failed_calls": 2, "prompt_tokens": 0, "output_tokens": 0},
+     "2 of 2 model calls have unknown usage (2 failed, 0 without token counts)"),
+    # Recorded before these counts existed: completeness cannot be checked.
     ({k: v for k, v in USAGE.items() if k != "calls_without_usage"}, "calls_without_usage missing"),
+    ({k: v for k, v in USAGE.items() if k != "failed_calls"}, "failed_calls missing"),
     ({k: v for k, v in USAGE.items() if k != "model_calls"}, "model_calls missing"),
 ])
 def test_incomplete_usage_is_unknown_not_a_low_estimate(usage, reason):
@@ -182,19 +192,24 @@ def test_zero_tokens_do_not_skip_model_or_usage_checks(usage, reason):
     assert result["unknown_reason"].startswith(reason)
 
 
+MONTREAL = ZoneInfo("America/Montreal")
+
+
 @pytest.mark.parametrize(("on", "expected"), [
-    (datetime(2026, 12, 31, 23, 30), 0.018),  # naive: its own date
-    (datetime(2026, 12, 31, 23, 30, tzinfo=timezone.utc), 0.018),
-    # 23:30 on Dec 31 in Montréal is already Jan 1 in UTC; the timestamp's own date is used.
-    (datetime(2026, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-5))), 0.018),
-    (datetime(2027, 1, 1, 0, 5, tzinfo=timezone.utc), 0.036),
+    # A timestamp is priced on its Cloud Billing day, which starts at midnight Pacific.
+    (datetime(2027, 1, 1, 7, 30, tzinfo=timezone.utc), 0.018),  # Dec 31, 23:30 Pacific
+    (datetime(2027, 1, 1, 8, 30, tzinfo=timezone.utc), 0.036),  # Jan 1, 00:30 Pacific
+    # Already Jan 1 in Montréal, but still Dec 31 in Pacific: the old price.
+    (datetime(2027, 1, 1, 0, 30, tzinfo=MONTREAL), 0.018),
+    (datetime(2027, 1, 1, 3, 30, tzinfo=MONTREAL), 0.036),  # 00:30 Pacific
+    (date(2027, 1, 1), 0.036),  # a plain date is taken as the billing day itself
 ])
-def test_a_datetime_counts_as_its_own_calendar_date(on, expected):
+def test_a_timestamp_is_priced_on_its_pacific_billing_day(on, expected):
     assert estimate(on=on)["estimated_usd"] == pytest.approx(expected)
     assert costs.gemini_price("synthetic-model", "global", on, SYNTHETIC_PRICES) is not None
 
 
-@pytest.mark.parametrize("bad", ["2026-11-22", None, 20261122])
+@pytest.mark.parametrize("bad", ["2026-11-22", None, 20261122, datetime(2027, 1, 1, 0, 30)])
 def test_anything_else_as_the_date_is_a_type_error_in_both_functions(bad):
     with pytest.raises(TypeError):
         estimate(on=bad)
@@ -216,11 +231,12 @@ def test_summary_counts_incomplete_usage_as_unknown_not_as_zero():
     estimates = [estimate(),
                  estimate({**USAGE, "prompt_tokens": 0, "output_tokens": 0}),  # calls, no tokens
                  estimate({**USAGE, "calls_without_usage": 2}),
+                 estimate({**USAGE, "failed_calls": 1}),  # a call that may have been billed
                  estimate(ZERO)]  # no model call: a real zero
 
     summary = costs.summarize(estimates)
 
-    assert (summary["requests"], summary["known"], summary["unknown"]) == (4, 2, 2)
+    assert (summary["requests"], summary["known"], summary["unknown"]) == (5, 2, 3)
     assert summary["known_total_usd"] == pytest.approx(0.018)
     assert summary["known_average_usd"] == pytest.approx(0.009)
 

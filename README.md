@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally and in Docker. Not deployed yet: the Cloud Run deploy script and smoke test are in `deployment/` (see [Deploy to Cloud Run](#deploy-to-cloud-run)), and the first deploy waits for project-owner access (#18).
+The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). The service is public; API keys and rate limiting are not in place yet (#22). See [Deploy to Cloud Run](#deploy-to-cloud-run).
 
 ## Folders
 
@@ -142,6 +142,41 @@ own to check (so a v2 that always fell back to v1 fails) and there are no bad re
 for an empty file; 2 when the file can't be opened.
 It needs `requirements-dev.txt` and is not part of the deployed API.
 
+**Load test for the canary.** [loadtest/run.py](loadtest/run.py) starts requests at a fixed rate (slow v2
+answers overlap instead of slowing the test), cycling through 5 places (Montréal to rural Mont-Laurier) × 5
+messages (none, a child with a fever in French, a mental-health crisis, chest pain, a sprained ankle). It saves
+each answer as it arrives, with its client-side latency, to `loadtest/results/` (ignored by Git) in the checker's
+format, so a run stopped with Ctrl-C keeps what it already sent. It prints the error rate (non-200s, timeouts,
+connection errors and 200s that aren't JSON) and p50/p95 latency per engine, then runs the correctness checker.
+It also prints a `v2-routed` line for [canary criterion 1](docs/canary.md): v2 failures, counting v1 fallbacks,
+over the requests that went to v2 (503s, timeouts and connection errors left out). With `--engine split` a non-200
+doesn't say which engine failed, so the request logs stay the source for that criterion.
+
+With `--engine v2`, it also asks v1 the same question for v2 answers without a message, so the checker can
+compare them. With `--engine split` that is off by default: production ignores `X-Engine`, so the "v1" request
+would go through the split again and add unplanned traffic to the canary. `--compare`/`--no-compare` override it.
+
+```bash
+# Against a local server (start it with ENGINE_HEADER_ENABLED=true to force an engine)
+python -m loadtest.run --engine v1 --rate 30 --duration 60 --max-requests 20
+# A canary step on Cloud Run (docs/canary.md): 12/min for 10 min = 120 requests; the split decides
+python -m loadtest.run --url https://<service-url> --engine split --rate 12 --duration 600 --max-requests 120 --no-compare --yes
+```
+
+Every request uses the real paid services, even against a local server: the Routes API is billed per
+origin-hospital pair and each v2 request makes up to 8 Gemini calls. So `--max-requests` caps the load requests
+(default 20), and the plan printed first also counts the v1 comparison requests and the most Routes elements the
+run can use, with no drive-time cache: 15 per v1 request, up to 45 per v2 request (2 searches of 15, plus 15 if it
+falls back to v1), and for `split` as if every request went to v2. For the canary step above that is 5,400
+elements, up to $54 once the 5,000 free ones of the month are used, which is why [docs/canary.md](docs/canary.md)
+requires the drive-time cache first. A run of more than 20 requests in all or one against a server that is not
+local needs `--yes`, and `--dry-run` prints the plan without sending anything. Options are checked before
+anything is sent (`--radius-km` 1–200, `--min-percent` 0–100). The default client timeout (130 s) is longer than
+Cloud Run's (120 s), so a request the service gives up on shows as its 504, not as a client timeout.
+`--engine v1`/`v2` needs `ENGINE_HEADER_ENABLED=true` on the server; the run warns when the header was ignored.
+The exit code is the checker's (`--min-percent` is passed to it), 1 when the run was interrupted, or 2 when it
+did not start.
+
 ### Fault injection (canary demo)
 
 Makes v2 fail or slow down on purpose ([fault_injection.py](app/agent_v2/fault_injection.py)). Set only by
@@ -182,7 +217,8 @@ sounds life-threatening, and answers in French or English.
 - **Same output as v1, plus:** `engine` (`v2` or `v1_fallback`), `call_911`, `note` and `model_usage`
   (model calls, tool calls and tokens for the request). Model calls include retried attempts, and
   `model_usage` is kept when v2 falls back, so the cost of every v2 request is recorded.
-  `calls_without_usage` counts answers that reported no tokens; then the token totals are too low.
+  `calls_without_usage` (answers with no token counts) and `failed_calls` (calls that failed, possibly
+  still billed) mean the token totals may be too low, so the cost estimate is unknown.
 - **Checked by our code:** the model only picks hospital ids and writes reasons. Every number comes from our
   data, and an id that was not returned by our services is rejected.
 - **Specialised ERs are checked too:** the model must say which specialised care the message shows is
@@ -213,7 +249,7 @@ cost nothing.
 
 ## Deploy to Cloud Run
 
-Target: dev service `navcare-api-dev` in `northamerica-northeast1` (not deployed yet), run as `navcare-run`; the Maps key comes from Secret Manager.
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key comes from Secret Manager.
 
 - `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
 - Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.

@@ -19,7 +19,7 @@ The facade (`app/api/facade.py`) picks an engine for each request at random. `V2
    python -m loadtest.run --url <dev-service-url> --engine v2 --rate 12 --duration 125 --max-requests 25 --min-percent 96 --yes
    ```
    This sends the 25 scenarios once each, to v2. For the 5 with no message, it also sends the same request to v1 and compares them. **Pass: at most 1 problem in total from the correctness checker** (1 out of 25 = 96 %, so `--min-percent 96` makes the command's PASS/FAIL and exit code match this rule). `--duration 125` is needed: the script sends `min(--max-requests, rate × duration / 60)` requests, so the default 60 s would send only 12.
-3. The Cloud Run request timeout is at least 120 s, longer than the agent's 60 s cap plus the v1 fallback. The load test's client timeout is 90 s.
+3. The Cloud Run request timeout is at least 120 s, longer than the agent's 60 s cap plus the v1 fallback. The load test's client timeout is 130 s, longer than that, so a request the service gives up on shows as its 504 (a server error in criterion 2), not as a client timeout.
 
 ## Where the numbers come from
 

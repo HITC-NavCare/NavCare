@@ -21,8 +21,8 @@ info:
     name: NAVCare team (COEN 424 / COEN 6313, Fall 2026)
     url: https://github.com/HITC-NavCare
 servers:
-  - url: https://navcare-gateway-REPLACE.northamerica-northeast1.run.app
-    description: Production (Cloud Run, Montréal). Replace with the deployed URL.
+  - url: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app
+    description: Dev service on Cloud Run (Montréal). API keys and /v1/hospitals are not live yet (#22).
   - url: http://localhost:8000
     description: Local development
 tags:
@@ -583,6 +583,9 @@ components:
             calls_without_usage:
               type: integer
               description: Model answers that reported no token counts. Above 0, the token totals are incomplete.
+            failed_calls:
+              type: integer
+              description: Model calls that failed (they may still have been billed). Above 0, the token totals may be incomplete.
         data_updated_at:
           type: string
           format: date-time

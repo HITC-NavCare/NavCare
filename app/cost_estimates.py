@@ -7,25 +7,33 @@
   VERTEX_PRICING_URL. Other models, locations and dates give unknown.
 - Missing, invalid or incomplete usage, or no price for the model, location and date, gives
   None, never 0. A recorded zero (no model call) gives 0.
-- `on` is a date; a datetime counts as its own calendar date (in its own timezone, if any).
+- Incomplete: any model call that failed (it may still have been billed) or answered without
+  token counts. Older records without these counts, or from before 2026-11-22, are unknown.
+- `on` is the Cloud Billing day, which starts at midnight US Pacific Time. A date is taken as
+  that day; an aware datetime is converted to it; a naive datetime is rejected as ambiguous.
 """
 
 import math
 from collections import defaultdict
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 VERTEX_PRICING_URL = "https://cloud.google.com/vertex-ai/generative-ai/pricing"
 TOKENS_PER_PRICE_UNIT = 1_000_000
 CURRENCY = "USD"
+# https://cloud.google.com/billing/docs/how-to/reports: billing days start at midnight Pacific.
+# The pricing page does not say which time zone its Jan 1 change uses; the billing day is assumed.
+BILLING_TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 # Rows: model, location, from, until (dates, None = open), input_per_million,
 # output_per_million (output includes thinking tokens), source, checked_on.
 # Standard PayGo, global. The page gives no start date for the introductory price, so it starts
-# on the day it was checked; earlier dates are unknown.
-PRICES_CHECKED_ON = date(2026, 11, 22)
+# on the day it was first seen there; earlier dates are unknown.
+PRICES_FIRST_SEEN = date(2026, 11, 22)
+PRICES_CHECKED_ON = date(2026, 11, 24)
 GEMINI_PRICES = (
     {"model": "gemini-3.8-flash", "location": "global",
-     "from": PRICES_CHECKED_ON, "until": date(2026, 12, 31),
+     "from": PRICES_FIRST_SEEN, "until": date(2026, 12, 31),
      "input_per_million": 0.75, "output_per_million": 3.75,
      "source": VERTEX_PRICING_URL, "checked_on": PRICES_CHECKED_ON},
     {"model": "gemini-3.8-flash", "location": "global",
@@ -33,8 +41,10 @@ GEMINI_PRICES = (
      "input_per_million": 1.50, "output_per_million": 7.50,
      "source": VERTEX_PRICING_URL, "checked_on": PRICES_CHECKED_ON},
 )
-# Whole numbers in model_usage. calls_without_usage counts answers that reported no tokens.
-COUNT_FIELDS = ("model_calls", "calls_without_usage", "prompt_tokens", "output_tokens")
+# Whole numbers in model_usage. calls_without_usage and failed_calls are calls whose usage
+# was not reported.
+COUNT_FIELDS = ("model_calls", "calls_without_usage", "failed_calls", "prompt_tokens",
+                "output_tokens")
 
 
 def gemini_price(model, location, on, prices=GEMINI_PRICES):
@@ -74,9 +84,11 @@ def estimate_gemini_cost(model_usage, location, on, prices=GEMINI_PRICES):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return _unknown(f"{field} is not a whole number: {value!r}")
         counts[field] = value
-    if counts["calls_without_usage"]:
-        return _unknown(f"{counts['calls_without_usage']} of {counts['model_calls']} model calls "
-                        "reported no tokens")
+    unaccounted = counts["calls_without_usage"] + counts["failed_calls"]
+    if unaccounted:
+        return _unknown(f"{unaccounted} of {counts['model_calls']} model calls have unknown usage "
+                        f"({counts['failed_calls']} failed, {counts['calls_without_usage']} "
+                        "without token counts)")
     if counts["model_calls"] and not (counts["prompt_tokens"] or counts["output_tokens"]):
         return _unknown(f"{counts['model_calls']} model calls but no tokens recorded")
 
@@ -128,11 +140,14 @@ def price_table_problems(prices=GEMINI_PRICES):
 
 
 def _as_date(on):
+    """The Cloud Billing day for `on` (see the module docstring)."""
     if isinstance(on, datetime):  # also a date, but cannot be compared with one
-        return on.date()
+        if on.tzinfo is None or on.utcoffset() is None:
+            raise TypeError("on is a datetime without a timezone; pass an aware one or a date")
+        return on.astimezone(BILLING_TIMEZONE).date()
     if isinstance(on, date):
         return on
-    raise TypeError(f"on must be a date or datetime, not {type(on).__name__}")
+    raise TypeError(f"on must be a date or an aware datetime, not {type(on).__name__}")
 
 
 def _unknown(reason):
