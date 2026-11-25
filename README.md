@@ -16,7 +16,8 @@ app/services/        Routing (Google Routes), weather (Open-Meteo) and live ER s
 app/recommender_v1/  v1: rule-based ranking
 app/agent_v2/        v2: AI agent (Gemini on Vertex AI chooses the tools to call and the ERs)
 data/                Small sample data files (no personal information)
-deployment/          Google Cloud deployment files
+deployment/          Google Cloud deployment, smoke test and canary commands
+loadtest/            Load test and canary step check
 tests/               Automated tests
 docs/                Requirements checklist and AI usage log
 .github/workflows/   Lint and test checks on every push and pull request
@@ -191,10 +192,64 @@ environment variables; off by default; affects only requests routed to v2 (and `
 
 ```bash
 # Local: set both in .env and restart uvicorn; remove them and restart to stop.
-# Cloud Run (each change creates a new revision):
-gcloud run services update <service> --update-env-vars V2_FAULT_ENABLED=true,V2_FAULT_MODE=error                # on
-gcloud run services update <service> --remove-env-vars V2_FAULT_ENABLED,V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+# Cloud Run (each change creates a new revision), see "Running a canary step":
+deployment/canary.sh fault error      # or: fault slow [seconds]
+deployment/canary.sh fault off
 ```
+
+### Running a canary step
+
+[docs/canary.md](docs/canary.md) has the criteria, steps and rules; these commands carry them out on Cloud Run.
+
+**Change the split** with [deployment/canary.sh](deployment/canary.sh). Each command prints the settings before
+and after (read back from the service), changes only the variables it names, and takes about a minute, since a
+new revision is deployed. It uses the same `ENV`, `PROJECT_ID`, `REGION` and `SERVICE` as `deploy.sh` (dev by
+default) and needs gcloud signed in with permission to update the service.
+
+```bash
+deployment/canary.sh status           # current share, fault settings and header setting; changes nothing
+deployment/canary.sh set 10           # promote: send 10 % of requests to v2 (whole numbers 0-100)
+deployment/canary.sh rollback         # all traffic back to v1 (V2_TRAFFIC_PERCENT=0)
+deployment/canary.sh fault error      # demo: v2 fails and v1 answers (v1_fallback)
+deployment/canary.sh fault slow 40    # demo: v2 waits 40 s first (1-60, default 35)
+deployment/canary.sh fault off
+```
+
+Every command warns while fault injection is on. Rollback leaves the fault settings as they are (v2 gets no
+traffic at 0 %); turn the fault off before the next promotion.
+
+**Check the step** with [loadtest/step_check.py](loadtest/step_check.py), after the step's load test:
+
+```bash
+# 1. Run the step (same command at every step, docs/canary.md)
+python -m loadtest.run --url https://<service-url> --engine split --rate 12 --duration 600 --max-requests 120 --no-compare --yes --out loadtest/results/step1.jsonl
+# 2. Run the check once without --logs: it prints the gcloud command for the step's time window
+python -m loadtest.step_check loadtest/results/step1.jsonl --percent 10
+# 3. Fetch the log lines with that command (wait a minute or two after the step), then check again
+python -m loadtest.step_check loadtest/results/step1.jsonl --percent 10 --logs logs.json --baseline loadtest/results/step0.jsonl
+```
+
+It prints PASS, FAIL, `n/a` or NOT CHECKED for criteria 1 to 6, a reminder to check criterion 7 (billing and
+budget alerts) by hand, the decision, the command to run next, and a row for the canary log in `docs/canary.md`.
+
+- **Decision:** ROLLBACK when a criterion whose action is rollback fails. HOLD when a hold criterion fails, a
+  criterion could not be checked, or the step had fewer than 8 v2 requests: run the same step again and pass
+  both results files (`step1.jsonl step1b.jsonl`). PROMOTE when every criterion passes. In the 0 % baseline
+  step every failure is a hold, since there is nothing to roll back. Exit code 0 promote, 1 rollback, 3 hold,
+  2 when a file cannot be read.
+- **Log lines** (`--logs`): results are matched to them by request id, so other traffic in the window is left
+  out. They say which engine served every request, errors included, and carry the server latency and the model
+  cost. Without them, criteria 1 and 3 use the results alone (an error that does not say its engine leaves
+  criterion 1 not checked), and criterion 6 is not checked. A local server's JSON log lines also work.
+- **Baseline** (`--baseline`): the 0 % step's results, needed for criterion 2 from step 1 on.
+- **Cost** (criterion 6) comes from `model_cost_usd` in the log lines, which needs a deployed revision with the
+  cost estimate (#41, #45). Until then it is NOT CHECKED, so the decision is at best HOLD. It is also NOT
+  CHECKED (HOLD) when any v2 request has `model_cost_unknown` (a 503, a 500 or a failed model call), as the
+  dashboard's "INCOMPLETE: hold"; known costs over $0.05 on their own still mean ROLLBACK.
+- **Correctness:** a `v1_fallback` answer is v1's code, so it is held to v1's 100 %.
+
+For the demo's rollback: `canary.sh set 10`, `canary.sh fault error`, run the step, and the check reports
+criterion 1 failed and ROLLBACK; then `canary.sh rollback` and `canary.sh fault off`.
 
 ## v2 AI agent
 
