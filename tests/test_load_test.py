@@ -413,3 +413,14 @@ def test_rate_limit_warning_counts_the_comparisons():
     no_compare = run.parse_args(["--engine", "v2", "--rate", "30", "--duration", "600",
                                  "--max-requests", "300", "--no-compare"])
     assert run.rate_limit_warning(no_compare, *run.plan(no_compare)) is None
+
+
+def test_plan_prints_the_rate_limit_warning(capsys):
+    code = run.main(["--engine", "v2", "--rate", "30", "--duration", "600",
+                     "--max-requests", "300", "--dry-run"])
+    assert code == 0
+    assert "429" in capsys.readouterr().err
+
+    run.main(["--engine", "v2", "--rate", "25", "--duration", "600", "--max-requests", "250",
+              "--dry-run"])
+    assert "429" not in capsys.readouterr().err

@@ -78,6 +78,14 @@ def test_redeploy_keeps_the_canary_share_and_the_repo(tmp_path):
     assert "V2_TRAFFIC_PERCENT" not in only(calls, "run deploy")
 
 
+def test_every_deploy_removes_the_key_switch(tmp_path):
+    # API_KEYS_DISABLED left on by a test must never survive a deploy (#49 review).
+    for existing in (False, True):
+        calls, _ = deploy(tmp_path, existing=existing)
+        assert "--remove-env-vars=API_KEYS_DISABLED" in only(calls, "run deploy")
+        (tmp_path / "calls.log").unlink()
+
+
 def test_header_only_on_when_asked_and_never_in_prod(tmp_path):
     calls, _ = deploy(tmp_path, ENGINE_HEADER_ENABLED="true")
     assert "ENGINE_HEADER_ENABLED=true" in only(calls, "run deploy")
