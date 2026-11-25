@@ -24,6 +24,9 @@ sent to v1 (forced with X-Engine) so the checker can compare them. It is on by d
 "v1" request would go through the split again (sometimes to v2), cost money and add traffic
 the canary did not plan. --compare / --no-compare override the default.
 
+API key: set NAVCARE_API_KEY and it is sent as X-API-Key on every request (never saved). The
+service allows each key 30 requests per minute by default, so keep --rate at or under that.
+
 Results go to loadtest/results/ (ignored by Git) unless --out says otherwise.
 """
 
@@ -32,6 +35,7 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -45,6 +49,7 @@ from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS, MAX_ROUTE_SEARCHE
 from app.services.nearest_hospital_getter import MAX_CANDIDATES
 
 RECOMMENDATIONS_PATH = "/v1/recommendations"
+API_KEY_ENV_VAR = "NAVCARE_API_KEY"  # sent as X-API-Key (app/api/auth.py)
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 # Without --yes, a run may send at most this many requests in all, and only to a local server.
@@ -253,7 +258,11 @@ async def run(args, total, on_result, transport=None):
     # and a limit would make new ones wait here and add that wait to their latency.
     limits = httpx.Limits(max_connections=None, max_keepalive_connections=None)
     tasks = []
-    async with httpx.AsyncClient(base_url=args.url, transport=transport, limits=limits) as client:
+    # The API key (app/api/auth.py) goes on every request; it is never printed or saved.
+    api_key = os.environ.get(API_KEY_ENV_VAR)
+    headers = {"X-API-Key": api_key} if api_key else {}
+    async with httpx.AsyncClient(base_url=args.url, transport=transport, limits=limits,
+                                 headers=headers) as client:
         start = time.monotonic()
         for index in range(total):
             delay = start + index * interval - time.monotonic()

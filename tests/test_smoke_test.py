@@ -93,3 +93,20 @@ def test_main_exit_code_and_output(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "PASS health" in output and "PASS v1 recommendation" in output
     assert "v2" not in output  # v2 is only checked with --v2
+
+
+def test_api_key_and_token_go_on_the_session(monkeypatch):
+    monkeypatch.setenv(smoke_test.API_KEY_ENV_VAR, "secret-key")
+    monkeypatch.setenv("ID_TOKEN", "token")
+    sent = {}
+
+    def fake_get(session, url, **kwargs):
+        sent.update(session.headers)
+        raise SystemExit  # stop before any network call
+
+    monkeypatch.setattr(smoke_test.requests.Session, "get", fake_get)
+    get = smoke_test.make_get("http://test")
+    with pytest.raises(SystemExit):
+        get("/v1/health")
+    assert sent["X-API-Key"] == "secret-key"
+    assert sent["Authorization"] == "Bearer token"
