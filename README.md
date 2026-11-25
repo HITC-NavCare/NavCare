@@ -336,7 +336,7 @@ gcloud run deploy navcare-api-dev --region=northamerica-northeast1 \
 
 Then set `DEPLOY_PAUSED=true` until the fix is merged, or the next merge deploys `main` again. Don't send traffic to an old revision instead: each revision keeps its own env vars, so that would also bring back an old `V2_TRAFFIC_PERCENT`.
 
-**Sign-in:** GitHub signs in as the `github-deployer` service account with Workload Identity Federation. Google accepts only pushes and manual runs on `main` of this repository, and no key file exists. The deployer can deploy Cloud Run (and call the private service for the smoke test), submit Cloud Build builds, read Artifact Registry and upload to the Cloud Build bucket, nothing more. `deploy.sh` gets `BUILD_LOGS=false` (no log streaming, which would need project Viewer; the logs stay in Cloud Build) and `STAGING_BUCKET` (so it needs no project-wide bucket listing).
+**Sign-in:** GitHub signs in as the `github-deployer` service account with Workload Identity Federation. Google accepts only pushes and manual runs on `main` of this repository, and no key file exists. The deployer can deploy Cloud Run (and call the service with an ID token for the smoke test, so it also works if the service is made private), submit Cloud Build builds, read Artifact Registry and upload to the Cloud Build bucket, nothing more. `deploy.sh` gets `BUILD_LOGS=false` (no log streaming, which would need project Viewer; the logs stay in Cloud Build) and `STAGING_BUCKET` (so it needs no project-wide bucket listing).
 
 **One-time setup** (project Owner only: Editors can't grant roles):
 
@@ -345,7 +345,7 @@ deployment/setup_ci.sh --dry-run   # prints every change, makes none
 deployment/setup_ci.sh             # safe to run again
 ```
 
-It prints two values to save as repository variables (Settings > Secrets and variables > Actions > Variables): `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_DEPLOYER_SA`. Until they're set, the deploy job fails with a message saying so. If a deploy is denied a permission, add only that role in `setup_ci.sh` and run it again.
+It prints two values to save as repository variables (Settings > Secrets and variables > Actions > Variables): `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_DEPLOYER_SA`. The smoke test also needs an API key (`/v1/recommendations` answers 401 without one): add a `ci` key to the `NAVCARE_API_KEYS` secret in Secret Manager and save the same key as the repository **secret** (not a variable, so Actions masks it in the logs) `NAVCARE_API_KEY`. Until all three are set, the deploy job fails before deploying, with a message saying what's missing. If a deploy is denied a permission, add only that role in `setup_ci.sh` and run it again.
 
 ## Canary dashboard
 

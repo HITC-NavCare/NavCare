@@ -40,9 +40,14 @@ jobs:
         env:
           PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           DEPLOYER: ${{ vars.GCP_DEPLOYER_SA }}
+          NAVCARE_API_KEY: ${{ secrets.NAVCARE_API_KEY }}
         run: |
           if [ -z "$PROVIDER" ] || [ -z "$DEPLOYER" ]; then
             echo "::error::Set the repository variables GCP_WORKLOAD_IDENTITY_PROVIDER and GCP_DEPLOYER_SA (printed by deployment/setup_ci.sh), or set DEPLOY_PAUSED=true."
+            exit 1
+          fi
+          if [ -z "$NAVCARE_API_KEY" ]; then
+            echo "::error::Set the repository secret NAVCARE_API_KEY (the ci key from the NAVCARE_API_KEYS secret), or set DEPLOY_PAUSED=true."
             exit 1
           fi
 
@@ -74,7 +79,8 @@ jobs:
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      # The service is private: the smoke test calls it with an ID token of the deployer.
+      # navcare-api-dev is public, but the smoke test also sends an ID token of the deployer, so it
+      # keeps working if the service is made private.
       - id: token
         uses: google-github-actions/auth@v2
         with:
@@ -92,5 +98,6 @@ jobs:
       - name: Smoke test (health and one v1 request, no forced v2)
         env:
           ID_TOKEN: ${{ steps.token.outputs.id_token }}
+          NAVCARE_API_KEY: ${{ secrets.NAVCARE_API_KEY }}  # X-API-Key for /v1/recommendations (#49)
           URL: ${{ steps.service.outputs.url }}
         run: python -m deployment.smoke_test "$URL"
