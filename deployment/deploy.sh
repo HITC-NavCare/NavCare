@@ -40,7 +40,7 @@ fi
 # Public access is not changed here (see the README).
 gc run deploy "$SERVICE" --image="$IMAGE" --region="$REGION" \
   --service-account="navcare-run@$PROJECT_ID.iam.gserviceaccount.com" \
-  --set-secrets=GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest \
+  --set-secrets=GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest,NAVCARE_API_KEYS=NAVCARE_API_KEYS:latest \
   --update-env-vars="$ENV_VARS" \
   --labels="app=navcare,env=$ENV" \
   --cpu=1 --memory=512Mi --concurrency=40 --timeout=120 \

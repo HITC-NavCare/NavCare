@@ -14,14 +14,15 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request, Security
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 
 import orchestrator
 from app import cost_estimates
 from app.agent_v2.ai_agent_recommender import DEFAULT_LOCATION, LOCATION_ENV_VAR, MAX_MESSAGE_CHARS
-from app.api import facade
+from app.api import auth, facade
 from app.api.logs import configure_logging
 from app.recommender_v1 import rules_based_recommender as recommender
 from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM
@@ -54,6 +55,7 @@ def log_recommendation(request, status, engine, level=logging.INFO, message="rec
         "status": status,
         "engine": engine,  # v1, v2 or v1_fallback
         "chosen_by": getattr(request.state, "chosen_by", None),  # split or header
+        "api_key_name": getattr(request.state, "api_key_name", None),  # who called, never the key
         "latency_ms": None if started is None else round((time.monotonic() - started) * 1000),
         "model_usage": model_usage,
         **model_cost_fields(engine, model_usage),
@@ -84,13 +86,24 @@ app = FastAPI(
 )
 
 
-def error_response(status_code, code, message, request_id):
+def error_response(status_code, code, message, request_id, headers=None):
     """The standard error body from docs/openapi.yaml (components/schemas/Error)."""
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message, "request_id": request_id}},
-        headers={"X-Request-ID": request_id},
+        headers={"X-Request-ID": request_id, **(headers or {})},
     )
+
+
+# Declared with FastAPI's security helper so /docs gets an "Authorize" button and
+# /openapi.json lists the X-API-Key scheme. auto_error=False: auth.check_request decides.
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False,
+                              description="Your NAVCare API key.")
+
+
+def require_api_key(request: Request, api_key: str | None = Security(api_key_header)):
+    """Runs before /v1/recommendations: 401 without a valid key, 429 over the rate limit."""
+    request.state.api_key_name, request.state.rate_limit_headers = auth.check_request(api_key)
 
 
 @app.middleware("http")
@@ -99,7 +112,20 @@ async def add_request_id(request: Request, call_next):
     request.state.request_id = str(uuid4())
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
+    # X-RateLimit-Limit and -Remaining on every answer to a key that passed the check.
+    response.headers.update(getattr(request.state, "rate_limit_headers", {}))
     return response
+
+
+@app.exception_handler(auth.ApiKeyError)
+async def api_key_refused(request: Request, error: auth.ApiKeyError):
+    # Not a "recommendation" log line: refused callers are not part of the canary error rate.
+    logger.info("api key refused", extra={"fields": {
+        "event": "api_key_refused", "request_id": request.state.request_id,
+        "status": error.status_code, "code": error.code,
+    }})
+    return error_response(error.status_code, error.code, error.message,
+                          request.state.request_id, error.headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -129,7 +155,7 @@ def get_health():
     return {"status": "ok", "time": datetime.now(MONTREAL).isoformat()}
 
 
-@app.get("/v1/recommendations")
+@app.get("/v1/recommendations", dependencies=[Depends(require_api_key)])
 def get_recommendations(
     request: Request,
     lat: float = Query(ge=44.9, le=62.6, description="Latitude, within Quebec"),
