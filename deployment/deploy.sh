@@ -37,11 +37,13 @@ ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENGINE_HEADER_ENABLED=$ENGINE_HEADER_
 if ! gc run services describe "$SERVICE" --region="$REGION" >/dev/null 2>&1; then
   ENV_VARS="$ENV_VARS,V2_TRAFFIC_PERCENT=0"
 fi
-# Public access is not changed here (see the README).
+# Public access is not changed here (see the README). API_KEYS_DISABLED is removed on every
+# deploy, so a key switch left off by a test can never leave the API open.
 gc run deploy "$SERVICE" --image="$IMAGE" --region="$REGION" \
   --service-account="navcare-run@$PROJECT_ID.iam.gserviceaccount.com" \
   --set-secrets=GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest,NAVCARE_API_KEYS=NAVCARE_API_KEYS:latest \
   --update-env-vars="$ENV_VARS" \
+  --remove-env-vars=API_KEYS_DISABLED \
   --labels="app=navcare,env=$ENV" \
   --cpu=1 --memory=512Mi --concurrency=40 --timeout=120 \
   --min-instances=0 --max-instances="$MAX_INSTANCES"

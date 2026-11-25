@@ -399,3 +399,28 @@ def test_every_scenario_through_the_real_v1_api_passes_the_checker(tmp_path, cap
     assert all(r["response"]["call_911"] is True for r in chest_pain)  # the safety net
     assert "v1: 25 requests, 0 failed (0.0%" in output
     assert "v1: 25/25 correct (100.0%), 0 non-200 not checked" in output
+
+
+def test_rate_limit_warning_counts_the_comparisons():
+    # v2 at 25/min: 1 in 5 scenarios has no message, so comparisons add 5/min -> 30, at the limit.
+    at_limit = run.parse_args(["--engine", "v2", "--rate", "25", "--duration", "600",
+                               "--max-requests", "250"])
+    assert run.rate_limit_warning(at_limit, *run.plan(at_limit)) is None
+    over = run.parse_args(["--engine", "v2", "--rate", "30", "--duration", "600",
+                           "--max-requests", "300"])
+    warning = run.rate_limit_warning(over, *run.plan(over))
+    assert warning and "36 requests/min" in warning
+    no_compare = run.parse_args(["--engine", "v2", "--rate", "30", "--duration", "600",
+                                 "--max-requests", "300", "--no-compare"])
+    assert run.rate_limit_warning(no_compare, *run.plan(no_compare)) is None
+
+
+def test_plan_prints_the_rate_limit_warning(capsys):
+    code = run.main(["--engine", "v2", "--rate", "30", "--duration", "600",
+                     "--max-requests", "300", "--dry-run"])
+    assert code == 0
+    assert "429" in capsys.readouterr().err
+
+    run.main(["--engine", "v2", "--rate", "25", "--duration", "600", "--max-requests", "250",
+              "--dry-run"])
+    assert "429" not in capsys.readouterr().err

@@ -117,3 +117,13 @@ def test_limiter_resets_when_the_window_ends():
     assert limiter.allow("a", 2) == (False, 0, 1)
     now[0] += 0.5  # 60 s after the window started
     assert limiter.allow("a", 2) == (True, 1, 0)
+
+
+def test_missing_keys_are_logged_once(monkeypatch, caplog):
+    monkeypatch.delenv(auth.KEYS_ENV_VAR)
+    monkeypatch.setattr(auth, "_warned_no_keys", False)
+    caplog.set_level("WARNING", logger="navcare.api")
+    get(GOOD)
+    get(GOOD)
+    warnings = [r for r in caplog.records if auth.KEYS_ENV_VAR in r.getMessage()]
+    assert len(warnings) == 1
