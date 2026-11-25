@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). The service is public; API keys and rate limiting are not in place yet (#22). See [Deploy to Cloud Run](#deploy-to-cloud-run).
+The REST API (FastAPI) has GET /v1/health, GET /v1/recommendations?lat=..&lon=..., GET /v1/hospitals and GET /v1/hospitals/{id}. Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). Anyone can reach it, but every path except `/v1/health` needs an API key (see [API keys and rate limit](#api-keys-and-rate-limit)). See [Deploy to Cloud Run](#deploy-to-cloud-run).
 
 ## Folders
 
@@ -79,6 +79,24 @@ Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments 
 Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
 
 The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) answer behind the same paths, and the `engine` field in each response says which one answered (`v1`, `v2`, or `v1_fallback` when v2 failed).
+
+### API keys and rate limit
+
+`/v1/recommendations` calls paid services (Google Routes, Gemini), so it and the hospital endpoints need a key in the `X-API-Key` header. `/v1/health`, `/docs` and `/openapi.json` stay open. In Swagger UI, click **Authorize** and paste your key.
+
+```bash
+curl -H "X-API-Key: <your key>" "https://<service-url>/v1/recommendations?lat=45.5017&lon=-73.5673"
+```
+
+- No key or a wrong key: 401 `unauthorized`. Over the limit: 429 `rate_limited` with `Retry-After` (seconds). Every answer to a valid key has `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+- Limit: 30 requests per minute per key, shared by all paths (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that.
+- Keys: the Secret Manager secret `NAVCARE_API_KEYS`, as comma-separated `name:key` pairs (for example `loadtest:...,demo:...,prof:...`). The log line has the key's name (`api_key_name`), never the key. To add or remove a key, add a new secret version and redeploy (or update the service) so new instances read it.
+- If the secret is missing the API refuses every recommendation (fail closed). Locally, set `API_KEYS_DISABLED=true` in `.env` to work without keys; never set it on Cloud Run.
+- The load test and smoke test send `NAVCARE_API_KEY` from the environment as `X-API-Key`.
+
+### Hospitals
+
+`GET /v1/hospitals` lists every ER in `data/hospitals.csv` with its latest MSSS status from the public ER feed (no Google Routes or Gemini call). Filters: `region` (as published by MSSS, any letter case) and `has_live_data` (true or false). `GET /v1/hospitals/{id}` returns one ER by its MSSS 8-digit code: 404 `not_found` for an unknown code, 400 for a code that is not 8 digits. Each ER has `region`, `specialised` (children's, mental-health or cardiology ERs, which v1 never ranks), `has_live_data` and `status` (null without live data). The answer also has `data_updated_at` and `stale`. If the ER feed fails, both endpoints answer 503 `data_unavailable`. The usual occupancy by hour needs the stored hourly snapshots (#21).
 
 ### Choosing v1 or v2 (facade)
 
@@ -304,13 +322,13 @@ cost nothing.
 
 ## Deploy to Cloud Run
 
-Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key comes from Secret Manager.
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key and the API keys (`NAVCARE_API_KEYS`) come from Secret Manager, and both secrets must exist before a deploy.
 
 - `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
 - Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
 - `V2_TRAFFIC_PERCENT=0` is set only when the service is created, so a redeploy keeps the canary share. Fault injection stays off. `ENGINE_HEADER_ENABLED` is off unless set to `true` for a controlled dev test; turn it off again afterwards (`gcloud run services update navcare-api-dev --region=northamerica-northeast1 --update-env-vars=ENGINE_HEADER_ENABLED=false`).
 - The script never changes who can call the service. The first deploy needs two project-owner steps: give Cloud Build's default service account `roles/cloudbuild.builds.builder` (the organization blocks automatic grants), and after a private smoke test give `allUsers` `roles/run.invoker` on the service.
-- Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
+- Check a deploy with `NAVCARE_API_KEY=<a key> python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
 
 ### Automatic deploys to dev (CI/CD)
 

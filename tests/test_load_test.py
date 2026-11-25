@@ -188,6 +188,21 @@ def test_split_sends_no_header_records_no_forced_engine_and_does_not_compare(tmp
     assert all("engine" not in record for record in read_results(tmp_path))
 
 
+def test_api_key_from_the_environment_goes_on_every_request(tmp_path, monkeypatch):
+    monkeypatch.setenv(run.API_KEY_ENV_VAR, "secret-key")
+    transport, calls = fake_api(lambda request: (200, {"engine": "v1"}))
+    run.main(args_for(tmp_path, "--max-requests", "2", "--no-check"), transport=transport)
+    assert [call.headers.get("X-API-Key") for call in calls] == ["secret-key", "secret-key"]
+    assert "secret-key" not in (tmp_path / "results.jsonl").read_text(encoding="utf-8")
+
+
+def test_no_api_key_sends_no_header(tmp_path, monkeypatch):
+    monkeypatch.delenv(run.API_KEY_ENV_VAR, raising=False)
+    transport, calls = fake_api(lambda request: (200, {"engine": "v1"}))
+    run.main(args_for(tmp_path, "--max-requests", "1", "--no-check"), transport=transport)
+    assert "X-API-Key" not in calls[0].headers
+
+
 def test_timeouts_and_errors_are_recorded_as_non_200(tmp_path, capsys):
     count = 0
 

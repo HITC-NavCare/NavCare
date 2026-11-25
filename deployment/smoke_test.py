@@ -6,6 +6,7 @@
 A recommendation passes only with the expected engine and no problems from the correctness
 checker (schema and data rules), since a 200 can still be a v1 fallback. For a private service,
 set ID_TOKEN (for example from `gcloud auth print-identity-token`); it is never printed.
+Set NAVCARE_API_KEY to one of the service's API keys (sent as X-API-Key); never printed either.
 Needs requirements-dev.txt.
 """
 
@@ -19,6 +20,7 @@ import requests
 from app.quality.correctness import check_response
 
 MONTREAL = {"lat": 45.5017, "lon": -73.5673}
+API_KEY_ENV_VAR = "NAVCARE_API_KEY"  # one key, for the X-API-Key header (app/api/auth.py)
 TIMEOUT_S = 130  # above the service's 120 s request timeout
 
 
@@ -49,6 +51,9 @@ def make_get(base_url):
     token = os.environ.get("ID_TOKEN")
     if token:
         session.headers["Authorization"] = f"Bearer {token}"
+    api_key = os.environ.get(API_KEY_ENV_VAR)
+    if api_key:
+        session.headers["X-API-Key"] = api_key
 
     def get(path, params=None, headers=None):
         return session.get(base_url.rstrip("/") + path, params=params, headers=headers,
