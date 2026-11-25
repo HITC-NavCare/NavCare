@@ -16,19 +16,24 @@ Run it after every step, on that step's load-test results and its log lines from
   Criterion 6 is also not checked (so hold) when any v2 request's cost is unknown, unless the
   known costs alone are already over the limit.
 - --baseline: the 0 % step's results, for criterion 2 ("at most 1 error more than the baseline").
+- --publish: also write the step's correctness counts (criterion 5) to Cloud Logging with
+  gcloud, one entry per group, so the dashboard can chart them and the criterion 5 alert can
+  fire. Their timestamp is when they are written, so publish right after the step.
 
 Decision: ROLLBACK if any criterion whose action is rollback fails; else HOLD if one whose
 action is hold fails, a criterion could not be checked, or the step had fewer than
 MIN_V2_REQUESTS v2 requests; else PROMOTE, once criterion 7 (billing, checked by hand) passes.
 In the 0 % step there is nothing to roll back, so every failure means hold.
 
-Exit code: 0 promote, 1 rollback, 3 hold, 2 when a file cannot be read.
+Exit code: 0 promote, 1 rollback, 3 hold, 2 when a file cannot be read or --publish fails.
 """
 
 import argparse
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
@@ -52,6 +57,8 @@ PROMOTE, HOLD, ROLLBACK = "PROMOTE", "HOLD", "ROLLBACK"
 EXIT_CODES = {PROMOTE: 0, ROLLBACK: 1, HOLD: 3}
 V2_ENGINES = ("v2", "v1_fallback")  # the request went to v2 (a fallback is a v2 failure)
 DATA_UNAVAILABLE = 503
+CORRECTNESS_LOG = "navcare-canary"        # the Cloud Logging log --publish writes to
+CORRECTNESS_EVENT = "canary_correctness"  # jsonPayload.event of those entries
 
 
 class InputError(Exception):
@@ -249,12 +256,13 @@ def check_p95(number, name, rows, limit_ms, action, applicable):
                      cell=cell)
 
 
-def check_correctness(records, percent):
-    name = "Correctness and data consistency"
-    threshold = (f"v2 ≥ {V2_MIN_CORRECT_PERCENT} % (at most 1 wrong under {SMALL_STEP} v2 "
-                 "answers), v1 = 100 %")
-    results = [correctness.check_line(record) for record in records]
-    summary = correctness.summarise(results)
+def correctness_counts(records):
+    """({"v2": (checked, correct), "v1": (checked, correct)}, unreadable lines) for criterion 5.
+
+    A fallback is v1's code answering, so its answers count with v1's and must be right like
+    v1's.
+    """
+    summary = correctness.summarise([correctness.check_line(record) for record in records])
     bad = sum(row["bad_records"] for row in summary.values())
 
     def totals(engines):
@@ -262,9 +270,15 @@ def check_correctness(records, percent):
         correct = sum(summary.get(engine, {}).get("correct", 0) for engine in engines)
         return checked, correct
 
-    # A fallback is v1's code answering, so its answers must be right like v1's.
-    v2_checked, v2_correct = totals(["v2"])
-    v1_checked, v1_correct = totals(["v1", "v1_fallback"])
+    return {"v2": totals(["v2"]), "v1": totals(["v1", "v1_fallback"])}, bad
+
+
+def check_correctness(counts, bad, percent):
+    name = "Correctness and data consistency"
+    threshold = (f"v2 ≥ {V2_MIN_CORRECT_PERCENT} % (at most 1 wrong under {SMALL_STEP} v2 "
+                 "answers), v1 = 100 %")
+    v2_checked, v2_correct = counts["v2"]
+    v1_checked, v1_correct = counts["v1"]
     cell = (fmt_percent(v2_correct, v2_checked), fmt_percent(v1_correct, v1_checked))
     measured = (f"v2 {v2_correct}/{v2_checked} ({cell[0]}), "
                 f"v1 {v1_correct}/{v1_checked} ({cell[1]})")
@@ -333,13 +347,14 @@ def evaluate(records, percent, logs=None, baseline_records=None):
     v1_rows = [row for row in rows if row["engine"] == "v1" and row["status"] != DATA_UNAVAILABLE]
     any_503 = any(row["status"] == DATA_UNAVAILABLE for row in rows)
     v2_count = len(went_to_v2(rows))
+    counts, bad = correctness_counts(records)
 
     criteria = [
         check_v2_failures(rows, percent, any_503),
         check_user_errors(rows, percent, baseline_rows),
         check_p95(3, "v2 p95 latency", went_to_v2(rows), V2_P95_MAX_MS, ROLLBACK, percent > 0),
         check_p95(4, "v1 p95 latency (control)", v1_rows, V1_P95_MAX_MS, HOLD, percent < 100),
-        check_correctness(records, percent),
+        check_correctness(counts, bad, percent),
         check_cost(rows, percent, logs is not None),
         check_spend(),
     ]
@@ -368,7 +383,7 @@ def evaluate(records, percent, logs=None, baseline_records=None):
     return {"percent": percent, "requests": len(rows), "v2_requests": v2_count,
             "logged": sum(row["logged"] for row in rows), "criteria": criteria,
             "decision": decision, "reasons": reasons, "warnings": warnings_for(rows, percent),
-            "first_started_at": first_started_at(rows)}
+            "first_started_at": first_started_at(rows), "correctness": counts}
 
 
 def warnings_for(rows, percent):
@@ -475,12 +490,46 @@ def logs_command(records):
     # A request may take up to Cloud Run's 120 s timeout after it starts.
     start = (min(times) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (max(times) + timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    project = os.environ.get("PROJECT_ID", "project-69a1b17d-f37d-485c-912")
-    service = os.environ.get("SERVICE", f"navcare-api-{os.environ.get('ENV', 'dev')}")
+    project, service = project_and_service()
     query = (f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service}" '
              f'AND jsonPayload.event="recommendation" AND timestamp>="{start}" '
              f'AND timestamp<="{end}"')
     return f"gcloud logging read '{query}' --project={project} --format=json > logs.json"
+
+
+def project_and_service():
+    """The Google Cloud project and Cloud Run service, as deploy.sh and apply.sh name them."""
+    project = os.environ.get("PROJECT_ID", "project-69a1b17d-f37d-485c-912")
+    service = os.environ.get("SERVICE", f"navcare-api-{os.environ.get('ENV', 'dev')}")
+    return project, service
+
+
+def correctness_entries(result, service):
+    """The log entries --publish writes: one per group with answers (v2, and v1 with fallbacks).
+
+    The dashboard's correctness tile and the criterion 5 alert read them through the
+    correctness_checked and correctness_correct log-based metrics (deployment/monitoring/).
+    """
+    return [{"event": CORRECTNESS_EVENT, "service": service, "engine": group,
+             "step_percent": result["percent"], "checked": checked, "correct": correct}
+            for group, (checked, correct) in result["correctness"].items() if checked]
+
+
+def publish_correctness(result, run=None):
+    """Write the step's correctness counts to Cloud Logging with gcloud. Returns the entries.
+
+    Raises OSError when gcloud can't be started, subprocess.CalledProcessError when it fails.
+    """
+    run = run or subprocess.run
+    project, service = project_and_service()
+    gcloud = os.environ.get("GCLOUD", "gcloud")
+    executable = shutil.which(gcloud) or gcloud  # gcloud.cmd on Windows
+    entries = correctness_entries(result, service)
+    for entry in entries:
+        run([executable, f"--project={project}", "--quiet", "logging", "write",
+             CORRECTNESS_LOG, json.dumps(entry), "--payload-type=json"],
+            check=True, capture_output=True, text=True)
+    return entries
 
 
 def step_percent(text):
@@ -500,6 +549,9 @@ def main(argv=None):
     parser.add_argument("--logs", help="the step's log lines (gcloud logging read "
                         "--format=json, or a local server's JSON lines)")
     parser.add_argument("--baseline", help="the 0 %% step's results.jsonl (criterion 2)")
+    parser.add_argument("--publish", action="store_true",
+                        help="also write the correctness counts to Cloud Logging (gcloud), for "
+                        "the dashboard's criterion 5 tile and alert")
     args = parser.parse_args(argv)
 
     try:
@@ -517,6 +569,15 @@ def main(argv=None):
         if command:
             print("\nFetch the log lines for this step (a minute or two after it ends), then run "
                   "again with --logs logs.json:\n  " + command)
+    if args.publish:
+        try:
+            entries = publish_correctness(result)
+        except (OSError, subprocess.CalledProcessError) as error:
+            detail = getattr(error, "stderr", None) or error
+            print(f"Could not publish the correctness counts: {detail}", file=sys.stderr)
+            return 2
+        published = ", ".join(f"{e['engine']} {e['correct']}/{e['checked']}" for e in entries)
+        print(f"\nPublished correctness to Cloud Logging: {published or 'no answers to publish'}")
     return EXIT_CODES[result["decision"]]
 
 

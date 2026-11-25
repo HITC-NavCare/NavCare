@@ -12,7 +12,7 @@
           "title": "How to read this dashboard (__SERVICE__)",
           "text": {
             "format": "MARKDOWN",
-            "content": "- Each point covers the 10 minutes before it (one canary step): read a step at its end time. No traffic shows a gap, not a pass.\n- Counts come from PromQL `increase()`, which extrapolates and can be fractional (for example 19.6 or 1.2), so the 20-request and 1-failure lines are approximate. The step check (`loadtest/step_check.py`) counts log lines exactly and makes the decision.\n- Went to v2: engine `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3 (docs/canary.md).\n- Cost is an *estimated model-token cost* (Gemini only, no Routes or Cloud Run) over every line that went to v2, as criterion 6 says. A 503 or 500 on v2 may follow paid Gemini calls but logs no usage, so its cost is unknown, as is a failed or token-less model call. The known average is always drawn: as *complete* when nothing in the step is unknown, otherwise as *INCOMPLETE: hold*, which is not a pass. Unknown counts by status are next to it.\n- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not from this dashboard."
+            "content": "- Each point covers the 10 minutes before it (one canary step): read a step at its end time. No traffic shows a gap, not a pass.\n- Counts come from PromQL `increase()`, which extrapolates and can be fractional (for example 19.6 or 1.2), so the 20-request and 1-failure lines are approximate. The step check (`loadtest/step_check.py`) counts log lines exactly and makes the decision.\n- Went to v2: engine `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3 (docs/canary.md).\n- Cost is an *estimated model-token cost* (Gemini only, no Routes or Cloud Run) over every line that went to v2, as criterion 6 says. A 503 or 500 on v2 may follow paid Gemini calls but logs no usage, so its cost is unknown, as is a failed or token-less model call. The known average is always drawn: as *complete* when nothing in the step is unknown, otherwise as *INCOMPLETE: hold*, which is not a pass. Unknown counts by status are next to it.\n- Criterion 5 (correctness) shows only after `step_check.py --publish` runs for a step: one point per step, timed when it was published. Criteria 2 and 7 come from `results.jsonl` and the billing report, not from this dashboard.\n- The alert policies (`deployment/monitoring/alerts/`) use these same queries. An alert is a prompt to run the step check, not the decision."
           }
         }
       },
@@ -90,8 +90,6 @@
               {
                 "label": "criterion 1: 5 %",
                 "value": 5,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -124,8 +122,6 @@
               {
                 "label": "fewer than 20 v2 requests: at most 1",
                 "value": 1,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -158,8 +154,6 @@
               {
                 "label": "failure rate shown from 20",
                 "value": 20,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -192,8 +186,6 @@
               {
                 "label": "criterion 3: 30 s",
                 "value": 30000,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -226,8 +218,6 @@
               {
                 "label": "criterion 4: 5 s",
                 "value": 5000,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -268,8 +258,6 @@
               {
                 "label": "criterion 6: $0.05",
                 "value": 0.05,
-                "color": "RED",
-                "direction": "ABOVE",
                 "targetAxis": "Y1"
               }
             ],
@@ -343,6 +331,46 @@
             "thresholds": [],
             "yAxis": {
               "label": "tokens",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 80,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Criterion 5: correctness % per group (from step_check.py --publish)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * sum(increase(logging_googleapis_com:user___PREFIX___correctness_correct_sum{monitored_resource=\"global\",engine=\"v2\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___correctness_checked_sum{monitored_resource=\"global\",engine=\"v2\"}[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v2",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * sum(increase(logging_googleapis_com:user___PREFIX___correctness_correct_sum{monitored_resource=\"global\",engine=\"v1\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___correctness_checked_sum{monitored_resource=\"global\",engine=\"v1\"}[10m]))"
+                },
+                "plotType": "LINE",
+                "legendTemplate": "v1 (with fallbacks, must be 100 %)",
+                "targetAxis": "Y1"
+              }
+            ],
+            "thresholds": [
+              {
+                "label": "criterion 5: v2 95 %",
+                "value": 95,
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "% correct",
               "scale": "LINEAR"
             }
           }

@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 3: v2 p95 latency over 30 s",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 3: v2 p95 latency over 30 s",
+    "content": "The 95th percentile of `latency_ms` on `v2` and `v1_fallback` lines (without 503s) is over 30 s.\n\n**Action (docs/canary.md): rollback.** Confirm with the step check first, since the dashboard's counts are approximate:\n\n    python -m loadtest.step_check <results.jsonl> --percent <step> --logs logs.json --baseline <step0.jsonl>\n\nIf it says ROLLBACK: `deployment/canary.sh rollback` (and `deployment/canary.sh fault off` if fault injection is on).\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "CRITICAL",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "v2 p95 latency > 30 s",
+      "conditionPrometheusQueryLanguage": {
+        "query": "(histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user___PREFIX___latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\"}[10m])))) > 30000",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}

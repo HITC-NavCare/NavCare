@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 5: v2 correctness under 95 %",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 5: v2 correctness under 95 %",
+    "content": "From the counts `loadtest/step_check.py --publish` wrote for the step. See which answers were wrong with `python -m app.quality.correctness <results.jsonl>`.\n\n**Action (docs/canary.md): rollback.** Confirm with the step check first, since the dashboard's counts are approximate:\n\n    python -m loadtest.step_check <results.jsonl> --percent <step> --logs logs.json --baseline <step0.jsonl>\n\nIf it says ROLLBACK: `deployment/canary.sh rollback` (and `deployment/canary.sh fault off` if fault injection is on).\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "CRITICAL",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "v2 correct < 95 % (20+ v2 answers)",
+      "conditionPrometheusQueryLanguage": {
+        "query": "(100 * sum(increase(logging_googleapis_com:user___PREFIX___correctness_correct_sum{monitored_resource=\"global\",engine=\"v2\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___correctness_checked_sum{monitored_resource=\"global\",engine=\"v2\"}[10m])) and on() (sum(increase(logging_googleapis_com:user___PREFIX___correctness_checked_sum{monitored_resource=\"global\",engine=\"v2\"}[10m])) >= 20)) < 95",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}

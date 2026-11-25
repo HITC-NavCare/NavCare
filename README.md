@@ -265,6 +265,7 @@ budget alerts) by hand, the decision, the command to run next, and a row for the
   CHECKED (HOLD) when any v2 request has `model_cost_unknown` (a 503, a 500 or a failed model call), as the
   dashboard's "INCOMPLETE: hold"; known costs over $0.05 on their own still mean ROLLBACK.
 - **Correctness:** a `v1_fallback` answer is v1's code, so it is held to v1's 100 %.
+- **Publish** (`--publish`): also writes the correctness counts to Cloud Logging for the dashboard's criterion 5 tile and alert (see [Canary dashboard](#canary-dashboard)). Exit code 2 if gcloud fails.
 
 For the demo's rollback: `canary.sh set 10`, `canary.sh fault error`, run the step, and the check reports
 criterion 1 failed and ROLLBACK; then `canary.sh rollback` and `canary.sh fault off`.
@@ -340,7 +341,35 @@ Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 202
 - Went to v2: `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3.
 - No traffic shows a gap, not a pass. Counts come from `increase()`, which extrapolates and can be fractional, so the 20-request and 1-failure lines are approximate; `loadtest/step_check.py` counts exactly and decides.
 - Cost covers Gemini tokens only, over every line that went to v2 (criterion 6). A v2 503 or 500, a failed model call or one without token counts has an unknown cost. The known average is drawn as "complete", or as "INCOMPLETE: hold" when anything in the step is unknown; unknown counts by status are next to it.
-- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not the dashboard.
+- Criterion 5 (correctness) is fed in by the step check: `python -m loadtest.step_check ... --publish` writes the step's checked and correct counts (v2, and v1 with its fallbacks) to Cloud Logging with `gcloud logging write`. The `correctness_checked` and `correctness_correct` metrics read them, and the tile shows each group's % with the 95 % line. One point per step, timed when it was published, so publish right after the step. It uses the same `PROJECT_ID`/`SERVICE`/`ENV` as the printed `gcloud logging read` command.
+- Criteria 2 and 7 come from `results.jsonl` and the billing report, not the dashboard.
+
+### Alerts
+
+`deployment/monitoring/alerts/` holds the Cloud Monitoring alert policies for the dashboard's criteria, one condition each (Cloud Monitoring allows only one PromQL condition per policy, so criteria 1 and 5 have a second policy for small steps). Each condition is the chart's own PromQL query compared with the chart's threshold line, and `tests/test_monitoring.py` checks they stay identical.
+
+| Policy | Fires when (last 10 min) | Severity | docs/canary.md action |
+| --- | --- | --- | --- |
+| Criterion 1 | v2 failure rate > 5 % with 20+ v2 requests, or 2+ v2 failures with fewer | CRITICAL | rollback (hold if there are 503s) |
+| Criterion 3 | v2 p95 latency > 30 s | CRITICAL | rollback |
+| Criterion 4 | v1 p95 latency > 5 s | WARNING | hold and investigate |
+| Criterion 5 | v2 correct < 95 % with 20+ answers, or 2+ wrong with fewer | CRITICAL | rollback |
+| Criterion 5 (v1) | v1 correct < 100 % | WARNING | hold |
+| Criterion 6 | known average model cost > $0.05 per v2 request | CRITICAL | rollback |
+
+- `ALERT_EMAILS="a@example.com,b@example.com" deployment/monitoring/apply.sh` creates or updates them with one email channel per address (an existing channel for that address is reused). Pass the same list every time: an update sets each policy's channels to exactly that list. Without `ALERT_EMAILS` the policies still open incidents in the console, but email no one.
+- An alert is a prompt to run the step check, not the decision: counts come from `increase()` and are approximate. Each email links the action from docs/canary.md and the step check command.
+- Criterion 7 is covered by the project's budget alerts (#16).
+- Alert policies and channels need `gcloud beta` (`gcloud components install beta`).
+- On Windows (Git Bash), if gcloud is installed under a path with spaces such as `Cloud SDK`, point `GCLOUD` at its short path (`GCLOUD=C:/Users/<you>/AppData/Local/Google/CLOUDS~2/GOOGLE~1/bin/gcloud.cmd`), or `cmd` splits the path when an argument contains quotes.
+
+### Showing it live (issue #27)
+
+1. `ALERT_EMAILS=... deployment/monitoring/apply.sh` (once per service; metrics only count lines written after they exist).
+2. Run a canary step with v2 traffic, for example `deployment/canary.sh set 50` and the load test from [docs/canary.md](docs/canary.md#steps).
+3. Right after it: `python -m loadtest.step_check <results.jsonl> --percent 50 --logs logs.json --baseline <step0.jsonl> --publish`.
+4. Open Monitoring → Dashboards → "NavCare canary: navcare-api-dev" and set the time range to cover the step. v1 and v2 should show side by side in every tile, with correctness a few minutes after step 3. Take the screenshot for the issue.
+5. Optional, to see an alert fire: `deployment/canary.sh fault error`, run a short step, wait for the criterion 1 email, then `deployment/canary.sh fault off` and `deployment/canary.sh rollback`.
 
 ## Hospital and ER data
 
