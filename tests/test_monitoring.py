@@ -454,6 +454,15 @@ def test_a_group_with_no_answers_publishes_nothing():
     assert [(e["engine"], e["checked"]) for e in entries] == [("v1", 12)]
 
 
+def fake_gcloud_run(calls, already_published=""):
+    """A subprocess.run for publish_correctness: `logging read` prints already_published."""
+    def run(args, **kwargs):
+        calls.append(args)
+        out = already_published if "read" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+    return run
+
+
 def test_publish_writes_one_gcloud_entry_per_group(monkeypatch):
     calls = []
     monkeypatch.setenv("PROJECT_ID", "p-1")
@@ -461,26 +470,61 @@ def test_publish_writes_one_gcloud_entry_per_group(monkeypatch):
     records, _ = step_samples.step((3, {}), (2, {"engine": "v2"}))
     result = step_check.evaluate(records, 10)
 
-    entries = step_check.publish_correctness(result, run=lambda args, **kw: calls.append(args))
+    entries, written = step_check.publish_correctness(result, run=fake_gcloud_run(calls))
 
-    assert len(calls) == len(entries) == 2
-    for args, entry in zip(calls, entries):
+    assert written
+    read, *writes = calls
+    # First it looks for this step's entries, so a second --publish can't double the counts.
+    assert read[1:5] == ["--project=p-1", "--quiet", "logging", "read"]
+    assert read[5] == step_check.published_query("p-1", "navcare-api-prod", result["step_id"])
+    assert f'jsonPayload.step_id="{result["step_id"]}"' in read[5]
+    assert len(writes) == len(entries) == 2
+    for args, entry in zip(writes, entries):
         assert args[1:6] == ["--project=p-1", "--quiet", "logging", "write",
                              step_check.CORRECTNESS_LOG]
         assert json.loads(args[6]) == entry and entry["service"] == "navcare-api-prod"
+        assert entry["step_id"] == result["step_id"]
         assert args[7] == "--payload-type=json"
 
 
-def test_publish_failure_is_exit_code_2(tmp_path, monkeypatch, capsys):
+def test_a_step_already_published_is_not_written_again(tmp_path, monkeypatch, capsys):
+    # The usual second run (with --logs) must not add the step's counts again: 15 v2 answers
+    # with 1 wrong pass, but twice over they read as 28/30 = 93 % and fire criterion 5.
+    calls = []
+    monkeypatch.setattr(step_check.subprocess, "run", fake_gcloud_run(calls, "insert-id-1\n"))
+    records, _ = step_samples.step((5, {}), (14, {"engine": "v2"}),
+                                   (1, {"engine": "v2", "wrong": True}))
+    results = step_samples.write_results(tmp_path / "step.jsonl", records)
+
+    step_check.main([results, "--percent", "50", "--publish"])
+
+    assert [args[4] for args in calls] == ["read"]  # no write
+    assert "Not published again" in capsys.readouterr().out
+
+
+def test_step_id_is_the_same_for_the_same_step_only():
+    records, _ = step_samples.step((10, {}), (2, {"engine": "v2"}))
+    more, _ = step_samples.step((3, {"engine": "v2"}))
+
+    assert step_check.step_id(records, 10) == step_check.step_id(list(reversed(records)), 10)
+    assert step_check.step_id(records, 10) != step_check.step_id(records, 25)
+    assert step_check.step_id(records, 10) != step_check.step_id(records + more, 10)  # a re-run
+
+
+def test_publish_failure_is_reported_and_the_decision_stands(tmp_path, monkeypatch, capsys):
     def fail(args, **kwargs):
         raise subprocess.CalledProcessError(1, args, stderr="PERMISSION_DENIED")
 
-    monkeypatch.setattr(step_check.subprocess, "run", fail)
     records, _ = step_samples.step((12, {}))
     results = step_samples.write_results(tmp_path / "step0.jsonl", records)
+    decision = step_check.main([results, "--percent", "0"])
+    capsys.readouterr()
+    monkeypatch.setattr(step_check.subprocess, "run", fail)
 
-    assert step_check.main([results, "--percent", "0", "--publish"]) == 2
-    assert "Could not publish the correctness counts: PERMISSION_DENIED" in capsys.readouterr().err
+    assert step_check.main([results, "--percent", "0", "--publish"]) == decision
+    err = capsys.readouterr().err
+    assert "Could not publish the correctness counts" in err and "PERMISSION_DENIED" in err
+    assert "the decision above still stands" in err
 
 
 def test_correctness_chart_follows_criterion_5():
@@ -600,6 +644,9 @@ case "$*" in
   *" monitoring channels list "*) ;;
   *" monitoring channels create "*) echo "projects/1/notificationChannels/new" ;;
   *" monitoring policies list "*) printf '%s' "$FAKE_POLICIES" ;;
+  *" monitoring policies describe "*)
+    [ "${FAKE_DESCRIBE_FAILS:-0}" = 1 ] && exit 1
+    printf '%s' "${FAKE_POLICY_CHANNELS:-}" ;;
   *" logging metrics "*|*" monitoring dashboards "*|*" monitoring policies "*) keep "$@" ;;
 esac
 exit 0
@@ -609,7 +656,7 @@ needs_bash = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Wi
 
 
 def apply(tmp_path, service=None, exists=False, metric_service=SERVICE, dashboards="",
-          etag="abc123", alert_emails=None, policies=""):
+          etag="abc123", alert_emails=None, policies="", policy_channels=""):
     fake = tmp_path / "gcloud"
     fake.write_text(FAKE_GCLOUD, newline="\n")
     fake.chmod(0o755)
@@ -620,7 +667,8 @@ def apply(tmp_path, service=None, exists=False, metric_service=SERVICE, dashboar
     env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
            "FAKE_DIR": sent.as_posix(), "FAKE_EXISTS": "1" if exists else "0",
            "FAKE_METRIC_SERVICE": metric_service, "FAKE_DASHBOARDS": dashboards,
-           "FAKE_ETAG": etag, "FAKE_POLICIES": policies, "TMPDIR": temp.as_posix()}
+           "FAKE_ETAG": etag, "FAKE_POLICIES": policies, "TMPDIR": temp.as_posix(),
+           "FAKE_POLICY_CHANNELS": policy_channels}
     for name in ("PROJECT_ID", "SERVICE", "ALERT_EMAILS"):
         env.pop(name, None)
     if service:
@@ -737,6 +785,55 @@ def test_apply_without_alert_emails_still_applies_the_policies_and_says_so(tmp_p
     assert not any("monitoring channels" in c for c in calls)
     for stem, policy in ALERTS.items():
         assert json.loads((sent / f"{stem}.json").read_text()) == policy
+
+
+@needs_bash
+def test_apply_without_alert_emails_keeps_the_channels_policies_have(tmp_path):
+    # Applying again for a dashboard change must not stop the alert emails.
+    channels = "projects/1/notificationChannels/a;projects/1/notificationChannels/b"
+    result, calls, sent, _ = apply(tmp_path, policies="projects/1/alertPolicies/7",
+                                   policy_channels=channels)
+
+    assert result.returncode == 0, result.stderr
+    assert "keep their email channels" in result.stderr
+    assert not any("monitoring channels" in c for c in calls)
+    for stem, policy in ALERTS.items():
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == [
+            "projects/1/notificationChannels/a", "projects/1/notificationChannels/b"], stem
+
+
+@needs_bash
+def test_apply_stops_when_it_cannot_read_a_policys_channels(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_DESCRIBE_FAILS", "1")
+    result, calls, _, _ = apply(tmp_path, policies="projects/1/alertPolicies/7")
+
+    assert result.returncode != 0
+    assert not policy_calls(calls, "update")  # not updated with its channels cleared
+
+
+@needs_bash
+@pytest.mark.parametrize("value", ["none", " None "])
+def test_alert_emails_none_removes_the_channels(tmp_path, value):
+    result, calls, sent, _ = apply(tmp_path, alert_emails=value,
+                                   policies="projects/1/alertPolicies/7",
+                                   policy_channels="projects/1/notificationChannels/a")
+
+    assert result.returncode == 0, result.stderr
+    assert "email no one" in result.stderr
+    assert not any("policies describe" in c or "monitoring channels" in c for c in calls)
+    for stem in ALERTS:
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == []
+
+
+@needs_bash
+def test_alert_emails_in_another_case_reuse_the_channel(tmp_path):
+    result, calls, sent, _ = apply(tmp_path, alert_emails="Old@Example.COM")
+
+    assert result.returncode == 0, result.stderr
+    assert not any("channels create" in c for c in calls)
+    for stem in ALERTS:
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == [
+            "projects/1/notificationChannels/old"]
 
 
 @needs_bash

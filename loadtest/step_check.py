@@ -18,17 +18,22 @@ Run it after every step, on that step's load-test results and its log lines from
 - --baseline: the 0 % step's results, for criterion 2 ("at most 1 error more than the baseline").
 - --publish: also write the step's correctness counts (criterion 5) to Cloud Logging with
   gcloud, one entry per group, so the dashboard can chart them and the criterion 5 alert can
-  fire. Their timestamp is when they are written, so publish right after the step.
+  fire. Their timestamp is when they are written, so publish right after the step. Each step
+  is published once: the entries carry a step id from the results, and a run whose step is
+  already in Cloud Logging (the re-run with --logs, say) does not write it again, since the
+  counts would add up and could fire an alert for a step that passed.
 
 Decision: ROLLBACK if any criterion whose action is rollback fails; else HOLD if one whose
 action is hold fails, a criterion could not be checked, or the step had fewer than
 MIN_V2_REQUESTS v2 requests; else PROMOTE, once criterion 7 (billing, checked by hand) passes.
 In the 0 % step there is nothing to roll back, so every failure means hold.
 
-Exit code: 0 promote, 1 rollback, 3 hold, 2 when a file cannot be read or --publish fails.
+Exit code: 0 promote, 1 rollback, 3 hold, 2 when a file cannot be read. A failed --publish is
+reported but does not change it: the decision still stands.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -383,7 +388,18 @@ def evaluate(records, percent, logs=None, baseline_records=None):
     return {"percent": percent, "requests": len(rows), "v2_requests": v2_count,
             "logged": sum(row["logged"] for row in rows), "criteria": criteria,
             "decision": decision, "reasons": reasons, "warnings": warnings_for(rows, percent),
-            "first_started_at": first_started_at(rows), "correctness": counts}
+            "first_started_at": first_started_at(rows), "correctness": counts,
+            "step_id": step_id(records, percent)}
+
+
+def step_id(records, percent):
+    """The same id for the same step's results, however often the check runs on them.
+
+    A re-run step (two results files) gets a new id, since its counts are new.
+    """
+    lines = sorted(json.dumps(record, sort_keys=True) for record in records)
+    text = "\n".join([str(percent), *lines])
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def warnings_for(rows, percent):
@@ -511,12 +527,21 @@ def correctness_entries(result, service):
     correctness_checked and correctness_correct log-based metrics (deployment/monitoring/).
     """
     return [{"event": CORRECTNESS_EVENT, "service": service, "engine": group,
-             "step_percent": result["percent"], "checked": checked, "correct": correct}
+             "step_percent": result["percent"], "step_id": result["step_id"],
+             "checked": checked, "correct": correct}
             for group, (checked, correct) in result["correctness"].items() if checked]
 
 
+def published_query(project, service, step):
+    """The Cloud Logging query for entries --publish already wrote for this step."""
+    return (f'logName="projects/{project}/logs/{CORRECTNESS_LOG}" AND '
+            f'jsonPayload.event="{CORRECTNESS_EVENT}" AND jsonPayload.service="{service}" AND '
+            f'jsonPayload.step_id="{step}"')
+
+
 def publish_correctness(result, run=None):
-    """Write the step's correctness counts to Cloud Logging with gcloud. Returns the entries.
+    """Write the step's correctness counts to Cloud Logging with gcloud, unless this step is
+    already there. Returns (the entries for the step, whether they were written now).
 
     Raises OSError when gcloud can't be started, subprocess.CalledProcessError when it fails.
     """
@@ -525,11 +550,19 @@ def publish_correctness(result, run=None):
     gcloud = os.environ.get("GCLOUD", "gcloud")
     executable = shutil.which(gcloud) or gcloud  # gcloud.cmd on Windows
     entries = correctness_entries(result, service)
+    if not entries:
+        return entries, False
+    found = run([executable, f"--project={project}", "--quiet", "logging", "read",
+                 published_query(project, service, result["step_id"]), "--freshness=7d",
+                 "--limit=1", "--format=value(insertId)"],
+                check=True, capture_output=True, text=True)
+    if (found.stdout or "").strip():
+        return entries, False
     for entry in entries:
         run([executable, f"--project={project}", "--quiet", "logging", "write",
              CORRECTNESS_LOG, json.dumps(entry), "--payload-type=json"],
             check=True, capture_output=True, text=True)
-    return entries
+    return entries, True
 
 
 def step_percent(text):
@@ -570,15 +603,27 @@ def main(argv=None):
             print("\nFetch the log lines for this step (a minute or two after it ends), then run "
                   "again with --logs logs.json:\n  " + command)
     if args.publish:
-        try:
-            entries = publish_correctness(result)
-        except (OSError, subprocess.CalledProcessError) as error:
-            detail = getattr(error, "stderr", None) or error
-            print(f"Could not publish the correctness counts: {detail}", file=sys.stderr)
-            return 2
-        published = ", ".join(f"{e['engine']} {e['correct']}/{e['checked']}" for e in entries)
-        print(f"\nPublished correctness to Cloud Logging: {published or 'no answers to publish'}")
+        publish(result)
     return EXIT_CODES[result["decision"]]
+
+
+def publish(result):
+    """--publish, with what happened printed. A failure is reported; the decision stands."""
+    try:
+        entries, written = publish_correctness(result)
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", None) or error
+        print(f"Could not publish the correctness counts (the decision above still stands; "
+              f"run again with --publish to retry): {detail}", file=sys.stderr)
+        return
+    counts = ", ".join(f"{e['engine']} {e['correct']}/{e['checked']}" for e in entries)
+    if not entries:
+        print("\nPublished correctness to Cloud Logging: no answers to publish")
+    elif written:
+        print(f"\nPublished correctness to Cloud Logging: {counts}")
+    else:
+        print(f"\nNot published again: this step ({result['step_id']}) is already in Cloud "
+              f"Logging ({counts}), and publishing it twice would double its counts.")
 
 
 if __name__ == "__main__":
