@@ -32,8 +32,22 @@ This page only lists what must be true at the end; tasks will be tracked as GitH
 
 ## Extra feature (choose one)
 
-Pending team decision. Options: (1) REST/Open APIs on SwaggerHub, (2) Docker and/or DevOps CI/CD,
-(3) performance and operation measurement.
+**Chosen: (2) Docker and/or DevOps CI/CD** ([#30](https://github.com/HITC-NavCare/NavCare/issues/30)).
+The other options were (1) REST/Open APIs on SwaggerHub and (3) performance and operation measurement.
+
+- Why not (1): Option A already requires the interface on SwaggerHub (mandatory list above, #22), so it would
+  not be extra.
+- Why not (3): it overlaps the mandatory canary metrics and dashboard (#27, #29), and more measurement
+  means more paid load-test runs.
+- Why (2): it is separate from the mandatory work. The `Dockerfile`, lint and tests on every push and PR,
+  `deployment/deploy.sh` and `deployment/smoke_test.py` already exist.
+
+To do (#30):
+- [x] `Dockerfile` for the API image.
+- [x] CI: `ruff` and `pytest` on every push and PR (`.github/workflows/lint.yml`).
+- [ ] CD: every merge to `main` runs the tests, builds the image, deploys `navcare-api-dev` with
+  `deployment/deploy.sh` and runs the smoke test, signed in with Workload Identity Federation (no key file).
+- [ ] A `DEPLOY_PAUSED` switch, so no deploy happens during a canary step or the demo.
 
 ## Deliverables
 
@@ -44,7 +58,6 @@ Pending team decision. Options: (1) REST/Open APIs on SwaggerHub, (2) Docker and
 
 ## Pending decisions
 
-- Extra feature (see above).
 - Facade mechanism, for example Cloud Run traffic splitting between revisions or an API gateway.
 - Canary thresholds and step durations.
 - Gemini model version for v2.
