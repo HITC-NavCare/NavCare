@@ -312,6 +312,41 @@ Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 202
 - The script never changes who can call the service. The first deploy needs two project-owner steps: give Cloud Build's default service account `roles/cloudbuild.builds.builder` (the organization blocks automatic grants), and after a private smoke test give `allUsers` `roles/run.invoker` on the service.
 - Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
 
+### Automatic deploys to dev (CI/CD)
+
+Every merge to `main` deploys `navcare-api-dev` (`.github/workflows/deploy.yml`, #30):
+
+```
+merge to main → ruff + pytest → deploy.sh → check the image is this commit → smoke test (v1)
+```
+
+- **Results:** Actions tab, "Deploy dev". A failed check means no deploy. A failed smoke test leaves the new revision serving, so fix it or roll back (below).
+- **Manual redeploy of `main`:** Actions > Deploy dev > Run workflow.
+- **One at a time:** a deploy is never cancelled, and the next merge waits for it. If several merges wait, only the newest is deployed, since it includes the others.
+- **Pause:** set the repository variable `DEPLOY_PAUSED` to `true` during canary steps (#29) and the demo; the checks still run. A new revision in the middle of a canary step changes that step's latency and counts, even though the share is kept. Remember to set it back to `false`.
+- **Cost:** one Cloud Build run and one paid v1 request per merge; never a forced v2.
+- **Only dev:** prod stays manual (`ENV=prod deployment/deploy.sh`). `ENGINE_HEADER_ENABLED` stays off and the canary share is kept, as with a manual deploy.
+
+**Rollback:** deploy an earlier image. This makes a new revision with the current settings (find the tags in Artifact Registry > `navcare` > `api`, or use the short commit hash):
+
+```bash
+gcloud run deploy navcare-api-dev --region=northamerica-northeast1 \
+  --image=northamerica-northeast1-docker.pkg.dev/project-69a1b17d-f37d-485c-912/navcare/api:<earlier-commit>
+```
+
+Then set `DEPLOY_PAUSED=true` until the fix is merged, or the next merge deploys `main` again. Don't send traffic to an old revision instead: each revision keeps its own env vars, so that would also bring back an old `V2_TRAFFIC_PERCENT`.
+
+**Sign-in:** GitHub signs in as the `github-deployer` service account with Workload Identity Federation. Google accepts only pushes and manual runs on `main` of this repository, and no key file exists. The deployer can deploy Cloud Run (and call the private service for the smoke test), submit Cloud Build builds, read Artifact Registry and upload to the Cloud Build bucket, nothing more. `deploy.sh` gets `BUILD_LOGS=false` (no log streaming, which would need project Viewer; the logs stay in Cloud Build) and `STAGING_BUCKET` (so it needs no project-wide bucket listing).
+
+**One-time setup** (project Owner only: Editors can't grant roles):
+
+```bash
+deployment/setup_ci.sh --dry-run   # prints every change, makes none
+deployment/setup_ci.sh             # safe to run again
+```
+
+It prints two values to save as repository variables (Settings > Secrets and variables > Actions > Variables): `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_DEPLOYER_SA`. Until they're set, the deploy job fails with a message saying so. If a deploy is denied a permission, add only that role in `setup_ci.sh` and run it again.
+
 ## Canary dashboard
 
 `deployment/monitoring/` holds templates for the log-based metrics and the Cloud Monitoring dashboard for the canary criteria in [docs/canary.md](docs/canary.md).

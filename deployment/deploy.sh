@@ -18,6 +18,12 @@ IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/api:$(git rev-parse --short HEAD
 # Off unless asked for: with it on, anyone who can call the service can force the paid v2.
 ENGINE_HEADER_ENABLED="${ENGINE_HEADER_ENABLED:-false}"
 if [ "$ENV" != dev ]; then ENGINE_HEADER_ENABLED=false; fi
+# For CI (.github/workflows/deploy.yml), so the deployer account needs fewer permissions:
+# BUILD_LOGS=false waits for the build without streaming its logs (streaming needs project
+# Viewer; the logs stay in Cloud Build), and STAGING_BUCKET names the bucket for the source
+# upload (the default bucket lookup lists every bucket in the project).
+BUILD_LOGS="${BUILD_LOGS:-true}"
+STAGING_BUCKET="${STAGING_BUCKET:-}"
 
 gc() { "$GCLOUD" --project="$PROJECT_ID" --quiet "$@"; }
 
@@ -30,7 +36,10 @@ fi
 # 2. Build only committed files, so .env and local edits never leave this machine.
 SOURCE="$(mktemp -d)/source.tgz"
 git archive --format=tar.gz -o "$SOURCE" HEAD
-gc builds submit "$SOURCE" --region="$REGION" --tag="$IMAGE"
+BUILD_FLAGS=(--region="$REGION" --tag="$IMAGE")
+if [ "$BUILD_LOGS" = false ]; then BUILD_FLAGS+=(--suppress-logs); fi
+if [ -n "$STAGING_BUCKET" ]; then BUILD_FLAGS+=(--gcs-source-staging-dir="gs://$STAGING_BUCKET/source"); fi
+gc builds submit "$SOURCE" "${BUILD_FLAGS[@]}"
 
 # 3. Deploy. The canary share is set only when the service is created, so a redeploy keeps it.
 ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENGINE_HEADER_ENABLED=$ENGINE_HEADER_ENABLED"
