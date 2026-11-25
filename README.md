@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). Anyone can reach it, but `/v1/recommendations` needs an API key (see [API keys and rate limit](#api-keys-and-rate-limit)). See [Deploy to Cloud Run](#deploy-to-cloud-run).
+The REST API (FastAPI) has GET /v1/health, GET /v1/recommendations?lat=..&lon=..., GET /v1/hospitals and GET /v1/hospitals/{id}. Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). Anyone can reach it, but every path except `/v1/health` needs an API key (see [API keys and rate limit](#api-keys-and-rate-limit)). See [Deploy to Cloud Run](#deploy-to-cloud-run).
 
 ## Folders
 
@@ -81,17 +81,21 @@ The `/v1` in the paths is the API version, not the recommender engine. v1 (rules
 
 ### API keys and rate limit
 
-`/v1/recommendations` calls paid services (Google Routes, Gemini), so it needs a key in the `X-API-Key` header. `/v1/health`, `/docs` and `/openapi.json` stay open. In Swagger UI, click **Authorize** and paste your key.
+`/v1/recommendations` calls paid services (Google Routes, Gemini), so it and the hospital endpoints need a key in the `X-API-Key` header. `/v1/health`, `/docs` and `/openapi.json` stay open. In Swagger UI, click **Authorize** and paste your key.
 
 ```bash
 curl -H "X-API-Key: <your key>" "https://<service-url>/v1/recommendations?lat=45.5017&lon=-73.5673"
 ```
 
 - No key or a wrong key: 401 `unauthorized`. Over the limit: 429 `rate_limited` with `Retry-After` (seconds). Every answer to a valid key has `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
-- Limit: 30 requests per minute per key (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that.
+- Limit: 30 requests per minute per key, shared by all paths (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that.
 - Keys: the Secret Manager secret `NAVCARE_API_KEYS`, as comma-separated `name:key` pairs (for example `loadtest:...,demo:...,prof:...`). The log line has the key's name (`api_key_name`), never the key. To add or remove a key, add a new secret version and redeploy (or update the service) so new instances read it.
 - If the secret is missing the API refuses every recommendation (fail closed). Locally, set `API_KEYS_DISABLED=true` in `.env` to work without keys; never set it on Cloud Run.
 - The load test and smoke test send `NAVCARE_API_KEY` from the environment as `X-API-Key`.
+
+### Hospitals
+
+`GET /v1/hospitals` lists every ER in `data/hospitals.csv` with its latest MSSS status from the public ER feed (no Google Routes or Gemini call). Filters: `region` (as published by MSSS, any letter case) and `has_live_data` (true or false). `GET /v1/hospitals/{id}` returns one ER by its MSSS 8-digit code: 404 `not_found` for an unknown code, 400 for a code that is not 8 digits. Each ER has `region`, `specialised` (children's, mental-health or cardiology ERs, which v1 never ranks), `has_live_data` and `status` (null without live data). The answer also has `data_updated_at` and `stale`. If the ER feed fails, both endpoints answer 503 `data_unavailable`. The usual occupancy by hour needs the stored hourly snapshots (#21).
 
 ### Choosing v1 or v2 (facade)
 

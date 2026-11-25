@@ -44,13 +44,14 @@ def test_same_parameters_as_the_app(path):
     assert parameter_names(SPEC, path) == parameter_names(APP_SPEC, path)
 
 
-def test_only_recommendations_needs_the_api_key():
+def test_every_path_but_health_needs_the_api_key():
     scheme = SPEC["components"]["securitySchemes"]["ApiKeyAuth"]
     assert (scheme["type"], scheme["in"], scheme["name"]) == ("apiKey", "header", "X-API-Key")
     assert SPEC["security"] == [{"ApiKeyAuth": []}]  # the default for every path
     assert SPEC["paths"]["/v1/health"]["get"]["security"] == []  # ...except health
-    responses = SPEC["paths"]["/v1/recommendations"]["get"]["responses"]
-    assert {"401", "429"} <= set(responses)
+    for path in ("/v1/recommendations", "/v1/hospitals", "/v1/hospitals/{hospital_id}"):
+        assert "security" not in SPEC["paths"][path]["get"], path
+        assert {"401", "429"} <= set(SPEC["paths"][path]["get"]["responses"]), path
 
 
 def check_fields(body, schema, where):
@@ -85,3 +86,39 @@ def test_recommendation_example_matches_the_spec():
     for item in example["recommendations"]:
         check_fields(item, schemas["Recommendation"], "example recommendation")
         check_fields(item["hospital"], schemas["HospitalSummary"], "example hospital")
+
+
+def merged(schema):
+    """An allOf schema as one object schema: properties and required lists combined."""
+    schema = resolve(schema)
+    if "allOf" not in schema:
+        return schema
+    parts = [merged(part) for part in schema["allOf"]]
+    return {"properties": {k: v for p in parts for k, v in p.get("properties", {}).items()},
+            "required": [r for p in parts for r in p.get("required", [])]}
+
+
+def test_hospital_answers_match_the_spec(monkeypatch):
+    from app.services import hospital_status_getter
+    from tests.factories import make_er_data, make_status
+
+    monkeypatch.setattr(hospital_status_getter, "get_er_data",
+                        lambda: make_er_data({"51218097": make_status()}))
+    schemas = SPEC["components"]["schemas"]
+    listing = client.get("/v1/hospitals").json()
+    check_fields(listing, schemas["HospitalListResponse"], "hospital list")
+    statuses = 0
+    for hospital in listing["hospitals"]:
+        check_fields(hospital, merged(schemas["Hospital"]), "hospital")
+        if hospital["status"] is not None:
+            check_fields(hospital["status"], schemas["LiveStatus"], "status")
+            statuses += 1
+    assert statuses == 1
+    detail = client.get("/v1/hospitals/51218097").json()
+    check_fields(detail, schemas["HospitalDetailResponse"], "hospital detail")
+
+    ok = SPEC["paths"]["/v1/hospitals"]["get"]["responses"]["200"]
+    example = ok["content"]["application/json"]["example"]
+    check_fields(example, schemas["HospitalListResponse"], "list example")
+    check_fields(example["hospitals"][0], merged(schemas["Hospital"]), "list example hospital")
+    check_fields(example["hospitals"][0]["status"], schemas["LiveStatus"], "example status")

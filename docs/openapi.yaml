@@ -28,6 +28,8 @@ servers:
 tags:
   - name: Recommendations
     description: Ranked ER recommendations for a location
+  - name: Hospitals
+    description: Quebec ERs with their live status
   - name: System
     description: Service health
 security:
@@ -163,6 +165,120 @@ paths:
         '503':
           $ref: '#/components/responses/DataUnavailable'
 
+  /v1/hospitals:
+    get:
+      tags: [Hospitals]
+      operationId: listHospitals
+      summary: List Quebec ERs with their live status
+      description: |
+        Every ER NAVCare knows, with the latest MSSS status. Does not call
+        Google Routes or Gemini, but needs an API key and counts in its limit.
+      parameters:
+        - name: region
+          in: query
+          description: Health region as published by MSSS (any letter case).
+          schema:
+            type: string
+            maxLength: 100
+          example: Montréal
+        - name: has_live_data
+          in: query
+          description: true for only ERs with current data, false for only ERs without.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: All matching ERs
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HospitalListResponse'
+              example:
+                request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+                data_updated_at: '2026-10-22T14:00:00-04:00'
+                stale: false
+                count: 1
+                hospitals:
+                  - id: '51218097'
+                    name: HÔPITAL DE VERDUN
+                    address: 4000, boulevard LaSalle, Montréal, QC H4G 2A3
+                    lat: 45.4640998840332
+                    lon: -73.56400299072266
+                    region: Montréal
+                    specialised: false
+                    has_live_data: true
+                    status:
+                      stretchers: 30
+                      on_stretcher: 33
+                      occupancy_rate: 1.1
+                      present: 52
+                      waiting: 12
+                      over_24h: 3
+                      over_48h: 0
+                      avg_ambulatory_stay_hours: 3.5
+                      avg_stretcher_stay_hours: 18.2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/DataUnavailable'
+
+  /v1/hospitals/{hospital_id}:
+    get:
+      tags: [Hospitals]
+      operationId: getHospital
+      summary: Get one ER with its live status
+      description: |
+        The usual occupancy by hour will be added once hourly snapshots are
+        stored (#21).
+      parameters:
+        - name: hospital_id
+          in: path
+          required: true
+          description: MSSS 8-digit installation code.
+          schema:
+            type: string
+            pattern: '^[0-9]{8}$'
+          example: '51218097'
+      responses:
+        '200':
+          description: The ER and its latest status
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HospitalDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/DataUnavailable'
+
   /v1/health:
     get:
       tags: [System]
@@ -187,9 +303,9 @@ components:
       in: header
       name: X-API-Key
       description: |
-        One key per caller, sent in the `X-API-Key` header. Only
-        `/v1/recommendations` needs it. Limit: 30 requests per minute per key,
-        counted per server instance.
+        One key per caller, sent in the `X-API-Key` header. Every path except
+        `/v1/health` needs it. Limit: 30 requests per minute per key, shared by
+        all paths and counted per server instance.
 
   parameters:
     Lat:
@@ -275,6 +391,17 @@ components:
               code: rate_limited
               message: Limit of 30 requests per minute exceeded.
               request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
+    NotFound:
+      description: No ER with this id
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: not_found
+              message: No ER with id 12345678.
+              request_id: 7f3c2a9e-51b4-4c1e-9a0d-2e6f1b8c4d10
     InternalError:
       description: Unexpected server error
       content:
@@ -307,6 +434,105 @@ components:
         lon:
           type: number
           format: double
+
+    Hospital:
+      allOf:
+        - $ref: '#/components/schemas/HospitalSummary'
+        - type: object
+          required: [region, specialised, has_live_data, status]
+          properties:
+            region:
+              type: string
+              description: Health region, as published by MSSS.
+            specialised:
+              type: boolean
+              description: A children's, mental-health or cardiology ER. v1 never ranks these.
+            has_live_data:
+              type: boolean
+              description: False when MSSS currently publishes no data for this ER.
+            status:
+              allOf:
+                - $ref: '#/components/schemas/LiveStatus'
+              nullable: true
+              description: Null when has_live_data is false.
+
+    LiveStatus:
+      type: object
+      description: Latest MSSS status for the ER (the time is `data_updated_at`). A field is null when MSSS leaves it empty.
+      required: [occupancy_rate]
+      properties:
+        stretchers:
+          type: integer
+          nullable: true
+          description: Functional stretchers.
+        on_stretcher:
+          type: integer
+          nullable: true
+          description: Patients currently on a stretcher.
+        occupancy_rate:
+          type: number
+          description: Stretcher occupancy. Can exceed 1.0 when the ER is over capacity.
+          example: 1.05
+        present:
+          type: integer
+          nullable: true
+          description: People present in the ER.
+        waiting:
+          type: integer
+          nullable: true
+          description: People waiting to be seen by a physician.
+        over_24h:
+          type: integer
+          nullable: true
+          description: Patients on a stretcher for more than 24 hours.
+        over_48h:
+          type: integer
+          nullable: true
+          description: Patients on a stretcher for more than 48 hours.
+        avg_ambulatory_stay_hours:
+          type: number
+          nullable: true
+          description: Average stay of walk-in patients on the previous day, in hours.
+        avg_stretcher_stay_hours:
+          type: number
+          nullable: true
+          description: Average stay on a stretcher on the previous day, in hours.
+
+    HospitalListResponse:
+      type: object
+      required: [request_id, data_updated_at, stale, count, hospitals]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        data_updated_at:
+          type: string
+          format: date-time
+          description: Time of the MSSS snapshot used.
+        stale:
+          type: boolean
+          description: True when MSSS has stopped publishing new data (the status may be old).
+        count:
+          type: integer
+        hospitals:
+          type: array
+          items:
+            $ref: '#/components/schemas/Hospital'
+
+    HospitalDetailResponse:
+      type: object
+      required: [request_id, data_updated_at, stale, hospital]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        data_updated_at:
+          type: string
+          format: date-time
+        stale:
+          type: boolean
+        hospital:
+          $ref: '#/components/schemas/Hospital'
 
     Recommendation:
       type: object
@@ -493,6 +719,7 @@ components:
               enum:
                 - invalid_parameter
                 - unauthorized
+                - not_found
                 - rate_limited
                 - data_unavailable
                 - internal_error
