@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 5: v1 correctness under 100 %",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 5: v1 correctness under 100 %",
+    "content": "A v1 (or v1_fallback) answer failed the correctness checker. That is a checker or data problem, not a v2 one.\n\n**Action (docs/canary.md): hold and investigate**, not a rollback. Run the step check on the step's results and log lines before changing `V2_TRAFFIC_PERCENT`.\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "WARNING",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "v1 correct < 100 %",
+      "conditionPrometheusQueryLanguage": {
+        "query": "(100 * sum(increase(logging_googleapis_com:user___PREFIX___correctness_correct_sum{monitored_resource=\"global\",engine=\"v1\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___correctness_checked_sum{monitored_resource=\"global\",engine=\"v1\"}[10m]))) < 100",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}

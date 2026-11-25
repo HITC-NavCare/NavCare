@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 4: v1 p95 latency over 5 s",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 4: v1 p95 latency over 5 s",
+    "content": "v1 (the control) is slow, so the problem is likely the shared data services (routing, weather, ER status), not v2.\n\n**Action (docs/canary.md): hold and investigate**, not a rollback. Run the step check on the step's results and log lines before changing `V2_TRAFFIC_PERCENT`.\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "WARNING",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "v1 p95 latency > 5 s",
+      "conditionPrometheusQueryLanguage": {
+        "query": "(histogram_quantile(0.95, sum by (le) (increase(logging_googleapis_com:user___PREFIX___latency_ms_bucket{monitored_resource=\"cloud_run_revision\",engine=~\"v1\"}[10m])))) > 5000",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}
