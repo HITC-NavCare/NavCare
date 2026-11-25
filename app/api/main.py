@@ -14,9 +14,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTask
 
 import orchestrator
 from app import cost_estimates
@@ -25,6 +26,7 @@ from app.api import facade
 from app.api.logs import configure_logging
 from app.recommender_v1 import rules_based_recommender as recommender
 from app.services.nearest_hospital_getter import DEFAULT_RADIUS_KM
+from app.storage import request_log
 
 # Read local API keys from .env (not committed). In Cloud Run they come from Secret Manager.
 load_dotenv()
@@ -48,8 +50,9 @@ def log_recommendation(request, status, engine, level=logging.INFO, message="rec
     error rate (status), p95 latency (latency_ms) and cost (model_usage), for each engine.
     """
     started = getattr(request.state, "started", None)
-    logger.log(level, message, exc_info=exc_info, extra={"fields": {
-        "event": "recommendation",
+
+    fields = {
+       "event": "recommendation",
         "request_id": request.state.request_id,
         "status": status,
         "engine": engine,  # v1, v2 or v1_fallback
@@ -57,7 +60,11 @@ def log_recommendation(request, status, engine, level=logging.INFO, message="rec
         "latency_ms": None if started is None else round((time.monotonic() - started) * 1000),
         "model_usage": model_usage,
         **model_cost_fields(engine, model_usage),
-    }})
+    }
+
+    logger.log(level, message, exc_info=exc_info, extra={"fields": fields})
+    return fields  # for request_log, which is written asynchronously in the background
+
 
 
 def model_cost_fields(engine, model_usage, now=None):
@@ -119,8 +126,14 @@ async def internal_error(request: Request, error: Exception):
     if engine is None:  # not a recommendation request
         logger.error("request_id=%s unexpected error", request_id, exc_info=error)
     else:  # counted in that engine's error rate
-        log_recommendation(request, 500, engine, logging.ERROR,
-                           f"request_id={request_id} unexpected error", exc_info=error)
+        fields = log_recommendation(request, 500, engine, logging.ERROR,
+                                    f"request_id={request_id} unexpected error", exc_info=error)
+        response = error_response(500, "internal_error", INTERNAL_ERROR_MESSAGE, request_id)
+        response.background = BackgroundTask(
+            request_log.save,
+            request_log.build_record(fields, getattr(request.state, "log_inputs", {})),
+        )
+        return response
     return error_response(500, "internal_error", INTERNAL_ERROR_MESSAGE, request_id)
 
 
@@ -132,6 +145,7 @@ def get_health():
 @app.get("/v1/recommendations")
 def get_recommendations(
     request: Request,
+    background_tasks: BackgroundTasks,
     lat: float = Query(ge=44.9, le=62.6, description="Latitude, within Quebec"),
     lon: float = Query(ge=-79.8, le=-57.1, description="Longitude, within Quebec"),
     limit: int = Query(default=recommender.DEFAULT_LIMIT, ge=1, le=10),
@@ -148,6 +162,12 @@ def get_recommendations(
 ):
     request_id = request.state.request_id
     request.state.started = time.monotonic()
+    has_message = bool(message and message.strip())
+    request.state.log_inputs = {
+        "requested_at": datetime.now(timezone.utc),
+        "lat": lat, "lon": lon, "limit": limit, "radius_km": radius_km,
+        "has_message": has_message,
+    }
     engine, request.state.chosen_by = facade.choose_engine(x_engine)
     request.state.engine = engine
     try:
@@ -166,21 +186,24 @@ def get_recommendations(
             }
     except RuntimeError as error:
         # A data service (routing, weather or ER status) failed: say so, don't guess.
-        log_recommendation(request, 503, engine, logging.WARNING,
-                           f"request_id={request_id} data unavailable: {error}")
+        fields = log_recommendation(request, 503, engine, logging.WARNING,
+            f"request_id={request_id} data unavailable: {error}", model_usage=getattr(error, "model_usage", None))
+        background_tasks.add_task(
+            request_log.save, request_log.build_record(fields, request.state.log_inputs))
         return error_response(503, "data_unavailable", DATA_UNAVAILABLE_MESSAGE, request_id)
 
     result = dict(result)
     # Internal error text stays in the logs, like for 503s; clients see engine "v1_fallback".
     fallback_reason = result.pop("fallback_reason", None)
     if fallback_reason:
-        log_recommendation(request, 200, result["engine"], logging.WARNING,
+        fields = log_recommendation(request, 200, result["engine"], logging.WARNING,
                            f"request_id={request_id} v2 fell back to v1: {fallback_reason}",
                            model_usage=result.get("model_usage"))
     else:
-        log_recommendation(request, 200, result["engine"],
+        fields = log_recommendation(request, 200, result["engine"],
                            model_usage=result.get("model_usage"))
-
+    background_tasks.add_task(
+        request_log.save, request_log.build_record(fields, request.state.log_inputs, result))
     return {
         "request_id": request_id,
         "requested_at": datetime.now(MONTREAL).isoformat(),
