@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from app.api.main import app
 
-SPEC = yaml.safe_load(Path("docs/openapi.yaml").read_text(encoding="utf-8"))
+SPEC_PATH = Path(__file__).resolve().parents[1] / "docs" / "openapi.yaml"
+SPEC = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
 APP_SPEC = app.openapi()  # what FastAPI generates from the code (/openapi.json)
 client = TestClient(app)
 

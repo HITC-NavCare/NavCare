@@ -89,7 +89,7 @@ curl -H "X-API-Key: <your key>" "https://<service-url>/v1/recommendations?lat=45
 ```
 
 - No key or a wrong key: 401 `unauthorized`. Over the limit: 429 `rate_limited` with `Retry-After` (seconds). Every answer to a valid key has `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
-- Limit: 30 requests per minute per key, shared by all paths (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that.
+- Limit: 30 requests per minute per key, shared by all paths (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that. The window is fixed, so around a window change a key can make up to twice the limit within a few seconds.
 - Keys: the Secret Manager secret `NAVCARE_API_KEYS`, as comma-separated `name:key` pairs (for example `loadtest:...,demo:...,prof:...`). The log line has the key's name (`api_key_name`), never the key. To add or remove a key, add a new secret version and redeploy (or update the service) so new instances read it.
 - If the secret is missing the API refuses every recommendation (fail closed). Locally, set `API_KEYS_DISABLED=true` in `.env` to work without keys; never set it on Cloud Run.
 - The load test and smoke test send `NAVCARE_API_KEY` from the environment as `X-API-Key`.

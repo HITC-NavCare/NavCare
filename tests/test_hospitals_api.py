@@ -115,3 +115,19 @@ def test_live_status_mapping():
         "waiting": 10, "over_24h": 3, "over_48h": 0,
         "avg_ambulatory_stay_hours": 4.0, "avg_stretcher_stay_hours": 15.0,
     }
+
+
+def test_live_data_uses_the_recommenders_rule(monkeypatch):
+    # Occupancy without the average stay: v1 can't rank it, so it is not "live" here either.
+    monkeypatch.setattr(hospital_status_getter, "get_er_data", lambda: make_er_data(
+        {VERDUN: {**make_status(), "avgStayAmbulatoryHours": None}}))
+    verdun = client.get(f"/v1/hospitals/{VERDUN}").json()["hospital"]
+    assert verdun["has_live_data"] is False and verdun["status"] is None
+
+
+def test_region_blank_means_all_and_any_unicode_form_matches(er_feed):
+    everyone = client.get("/v1/hospitals").json()["count"]
+    assert client.get("/v1/hospitals", params={"region": " "}).json()["count"] == everyone
+    decomposed = "Montréal"  # "é" as e + combining accent, as macOS often types it
+    montreal = client.get("/v1/hospitals", params={"region": decomposed}).json()
+    assert montreal["count"] > 0

@@ -6,9 +6,10 @@ Routes or Gemini request. The usual-occupancy-by-hour pattern needs the stored h
 """
 
 import csv
+import unicodedata
 from functools import lru_cache
 
-from app.recommender_v1.rules_based_recommender import SPECIALISED_ER_IDS
+from app.recommender_v1.rules_based_recommender import SPECIALISED_ER_IDS, estimated_er_minutes
 from app.services import hospital_status_getter
 from app.services.nearest_hospital_getter import HOSPITALS_CSV_PATH
 
@@ -35,8 +36,9 @@ def load_hospitals():
 
 def live_status(emergency):
     """Our field names for patient.quebec's `emergency` object, or None when MSSS publishes no
-    current data for this ER (no occupancy)."""
-    if not emergency or emergency.get("occupancyPct") is None:
+    current data for this ER. Same rule as the recommenders (occupancy and average stay both
+    needed), so an ER "live" here is never "no_current_data" in /v1/recommendations."""
+    if estimated_er_minutes(emergency) is None:
         return None
     occupancy_pct = emergency["occupancyPct"]
     return {
@@ -57,6 +59,12 @@ def with_status(hospital, er_data):
     return {**hospital, "has_live_data": status is not None, "status": status}
 
 
+def normalized(text):
+    """For comparing names: trimmed, one Unicode form (a macOS "é" can be two characters), any
+    letter case."""
+    return unicodedata.normalize("NFC", (text or "").strip()).casefold()
+
+
 def list_hospitals(region=None, has_live_data=None):
     """All ERs with their status, filtered by region (any case) and by has_live_data.
 
@@ -64,9 +72,9 @@ def list_hospitals(region=None, has_live_data=None):
     """
     er_data = hospital_status_getter.get_er_data()
     hospitals = [with_status(hospital, er_data) for hospital in load_hospitals()]
-    if region:
-        wanted = region.strip().casefold()
-        hospitals = [h for h in hospitals if h["region"].casefold() == wanted]
+    wanted = normalized(region)
+    if wanted:
+        hospitals = [h for h in hospitals if normalized(h["region"]) == wanted]
     if has_live_data is not None:
         hospitals = [h for h in hospitals if h["has_live_data"] == has_live_data]
     return {

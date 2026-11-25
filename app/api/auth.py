@@ -16,6 +16,7 @@ counts on its own, so with N instances a key can make up to N times the limit.
 """
 
 import hmac
+import logging
 import math
 import os
 import threading
@@ -28,6 +29,9 @@ DEFAULT_LIMIT_PER_MINUTE = 30
 WINDOW_SECONDS = 60
 # Shown as the key name when keys are disabled (local development and tests).
 NO_KEY_NAME = "keys-disabled"
+
+logger = logging.getLogger("navcare.api")
+_warned_no_keys = False
 
 
 class ApiKeyError(Exception):
@@ -115,11 +119,24 @@ class RateLimiter:
 limiter = RateLimiter()
 
 
+def warn_no_keys_once():
+    """A broken or missing secret looks like a bad client key to callers (401); say it once in
+    the logs so a broken deploy is easy to spot."""
+    global _warned_no_keys
+    if not _warned_no_keys:
+        _warned_no_keys = True
+        logger.warning("%s is empty or has no name:key pairs: refusing every request",
+                       KEYS_ENV_VAR)
+
+
 def check_request(given_key):
     """Decide one request. Returns (key name, headers to add); raises ApiKeyError to refuse it."""
     if keys_disabled():
         return NO_KEY_NAME, {}
-    name = key_name_for(given_key, load_keys())
+    keys = load_keys()
+    if not keys:
+        warn_no_keys_once()
+    name = key_name_for(given_key, keys)
     if name is None:
         raise ApiKeyError(401, "unauthorized", "Missing or invalid X-API-Key header.")
     limit = limit_per_minute()
