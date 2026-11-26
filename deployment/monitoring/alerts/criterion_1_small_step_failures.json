@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 1: 2+ v2 failures in a small step",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 1: 2+ v2 failures in a small step",
+    "content": "Fewer than 20 requests went to v2 in the last 10 minutes and more than 1 of them failed (docs/canary.md allows at most 1). Counts come from `increase()` and can be fractional, so the step check's exact count decides.\n\n**Action (docs/canary.md): rollback.** Confirm with the step check first, since the dashboard's counts are approximate:\n\n    python -m loadtest.step_check <results.jsonl> --percent <step> --logs logs.json --baseline <step0.jsonl>\n\nIf it says ROLLBACK: `deployment/canary.sh rollback` (and `deployment/canary.sh fault off` if fault injection is on).\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "CRITICAL",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "2+ v2 failures with fewer than 20 v2 requests",
+      "conditionPrometheusQueryLanguage": {
+        "query": "(((sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v1_fallback\",status!=\"503\"}[10m])) or vector(0)) + (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=\"v2\",status=\"500\"}[10m])) or vector(0))) and on() (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) > 0) and on() (sum(increase(logging_googleapis_com:user___PREFIX___requests{monitored_resource=\"cloud_run_revision\",engine=~\"v2|v1_fallback\",status!=\"503\"}[10m])) < 20)) > 1",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}

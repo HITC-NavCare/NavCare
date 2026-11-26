@@ -24,6 +24,10 @@ sent to v1 (forced with X-Engine) so the checker can compare them. It is on by d
 "v1" request would go through the split again (sometimes to v2), cost money and add traffic
 the canary did not plan. --compare / --no-compare override the default.
 
+API key: set NAVCARE_API_KEY and it is sent as X-API-Key on every request (never saved). The
+service allows each key 30 requests per minute by default, and the v1 comparison requests count
+too: keep --rate x (1 + comparisons per request) at or under the limit. The plan warns when not.
+
 Results go to loadtest/results/ (ignored by Git) unless --out says otherwise.
 """
 
@@ -32,6 +36,7 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -42,9 +47,11 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.agent_v2.ai_agent_recommender import MAX_MODEL_CALLS, MAX_ROUTE_SEARCHES
+from app.api.auth import DEFAULT_LIMIT_PER_MINUTE
 from app.services.nearest_hospital_getter import MAX_CANDIDATES
 
 RECOMMENDATIONS_PATH = "/v1/recommendations"
+API_KEY_ENV_VAR = "NAVCARE_API_KEY"  # sent as X-API-Key (app/api/auth.py)
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 # Without --yes, a run may send at most this many requests in all, and only to a local server.
@@ -146,6 +153,22 @@ def describe_plan(args, total, comparisons):
         f"the 5,000 free elements of the month are used (${ROUTES_USD_PER_1000} per 1,000).\n"
         f"Gemini: up to {MAX_MODEL_CALLS} calls per v2 request."
     )
+
+
+def requests_per_minute(args, total, comparisons):
+    """Requests per minute on the API key, comparisons included (they use the same key)."""
+    return args.rate * (total + comparisons) / total if total else 0
+
+
+def rate_limit_warning(args, total, comparisons):
+    """A warning when the run would go over the service's default per-key limit, else None.
+    Over the limit the service answers 429, which counts as a failure of the run."""
+    per_minute = requests_per_minute(args, total, comparisons)
+    if per_minute <= DEFAULT_LIMIT_PER_MINUTE:
+        return None
+    return (f"Warning: about {per_minute:.0f} requests/min on one API key (comparisons "
+            f"included) is over the service's default limit of {DEFAULT_LIMIT_PER_MINUTE}/min: "
+            "the extra requests get 429 and count as failures. Lower --rate or use --no-compare.")
 
 
 def needs_confirmation(args, total, comparisons):
@@ -253,7 +276,11 @@ async def run(args, total, on_result, transport=None):
     # and a limit would make new ones wait here and add that wait to their latency.
     limits = httpx.Limits(max_connections=None, max_keepalive_connections=None)
     tasks = []
-    async with httpx.AsyncClient(base_url=args.url, transport=transport, limits=limits) as client:
+    # The API key (app/api/auth.py) goes on every request; it is never printed or saved.
+    api_key = os.environ.get(API_KEY_ENV_VAR)
+    headers = {"X-API-Key": api_key} if api_key else {}
+    async with httpx.AsyncClient(base_url=args.url, transport=transport, limits=limits,
+                                 headers=headers) as client:
         start = time.monotonic()
         for index in range(total):
             delay = start + index * interval - time.monotonic()
@@ -479,6 +506,9 @@ def main(argv=None, transport=None):
     args = parse_args(argv)
     total, comparisons = plan(args)
     print(describe_plan(args, total, comparisons))
+    warning = rate_limit_warning(args, total, comparisons)
+    if warning:
+        print(warning, file=sys.stderr)
     if args.dry_run:
         return 0
     if total == 0:

@@ -28,7 +28,8 @@ def deploy(tmp_path, existing=False, **env):
     log = tmp_path / "calls.log"
     run_env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
                "FAKE_DESCRIBE_EXIT": "0" if existing else "1", **env}
-    for name in ("PROJECT_ID", "ENV", "SERVICE", "ENGINE_HEADER_ENABLED", "MAX_INSTANCES"):
+    for name in ("PROJECT_ID", "ENV", "SERVICE", "ENGINE_HEADER_ENABLED", "MAX_INSTANCES",
+                 "BUILD_LOGS", "STAGING_BUCKET"):
         if name not in env:
             run_env.pop(name, None)
     result = subprocess.run([BASH, "deployment/deploy.sh"], cwd=REPO, env=run_env,
@@ -78,6 +79,14 @@ def test_redeploy_keeps_the_canary_share_and_the_repo(tmp_path):
     assert "V2_TRAFFIC_PERCENT" not in only(calls, "run deploy")
 
 
+def test_every_deploy_removes_the_key_switch(tmp_path):
+    # API_KEYS_DISABLED left on by a test must never survive a deploy (#49 review).
+    for existing in (False, True):
+        calls, _ = deploy(tmp_path, existing=existing)
+        assert "--remove-env-vars=API_KEYS_DISABLED" in only(calls, "run deploy")
+        (tmp_path / "calls.log").unlink()
+
+
 def test_header_only_on_when_asked_and_never_in_prod(tmp_path):
     calls, _ = deploy(tmp_path, ENGINE_HEADER_ENABLED="true")
     assert "ENGINE_HEADER_ENABLED=true" in only(calls, "run deploy")
@@ -86,6 +95,23 @@ def test_header_only_on_when_asked_and_never_in_prod(tmp_path):
     calls, _ = deploy(tmp_path, ENV="prod", ENGINE_HEADER_ENABLED="true")
     run = only(calls, "run deploy")
     assert "navcare-api-prod" in run and "ENGINE_HEADER_ENABLED=false" in run
+
+
+def test_build_streams_logs_and_picks_the_bucket_by_default(tmp_path):
+    calls, _ = deploy(tmp_path)
+
+    build = only(calls, "builds submit")
+    assert "--suppress-logs" not in build and "--gcs-source-staging-dir" not in build
+
+
+def test_ci_build_skips_the_log_stream_and_names_the_bucket(tmp_path):
+    # deploy.yml sets these so the deployer needs neither project Viewer nor buckets.list.
+    calls, _ = deploy(tmp_path, existing=True, BUILD_LOGS="false", STAGING_BUCKET="proj_cloudbuild")
+
+    build = only(calls, "builds submit")
+    assert "--suppress-logs" in build
+    assert "--gcs-source-staging-dir=gs://proj_cloudbuild/source" in build
+    assert "V2_TRAFFIC_PERCENT" not in only(calls, "run deploy")
 
 
 def test_build_uploads_only_committed_files(tmp_path):

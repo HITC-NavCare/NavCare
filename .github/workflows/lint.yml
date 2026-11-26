@@ -1,6 +1,10 @@
 name: Lint
 
-on: [push, pull_request]
+on:
+  push:
+    branches-ignore: [main]  # on main, deploy.yml runs these checks (as "checks")
+  pull_request:
+  workflow_call:  # deploy.yml runs these same checks before it deploys
 
 permissions:
   contents: read

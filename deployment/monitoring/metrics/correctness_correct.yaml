@@ -1,0 +1,17 @@
+description: Answers the correctness checker found correct in a canary step, by group (v2; v1 with its fallbacks), from loadtest/step_check.py --publish (criterion 5).
+filter: >-
+  resource.type="global" AND jsonPayload.event="canary_correctness" AND jsonPayload.service="__SERVICE__" AND jsonPayload.checked>=1
+valueExtractor: EXTRACT(jsonPayload.correct)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DISTRIBUTION
+  unit: "1"
+  labels:
+    - key: engine
+      valueType: STRING
+labelExtractors:
+  engine: EXTRACT(jsonPayload.engine)
+# Only the _sum is charted (correct ÷ checked); the buckets are a step's usual sizes.
+bucketOptions:
+  explicitBuckets:
+    bounds: [10, 20, 30, 60, 120, 240]

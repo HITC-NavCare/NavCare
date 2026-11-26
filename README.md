@@ -6,7 +6,7 @@ COEN424/6313 Fall 2026 group project. The recommender will have two versions beh
 
 ## Status
 
-The REST API (FastAPI) has GET /v1/health and GET /v1/recommendations?lat=..&lon=... Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). The service is public; API keys and rate limiting are not in place yet (#22). See [Deploy to Cloud Run](#deploy-to-cloud-run).
+The REST API (FastAPI) has GET /v1/health, GET /v1/recommendations?lat=..&lon=..., GET /v1/hospitals and GET /v1/hospitals/{id}. Both recommenders answer behind it: v1 (rules) and the v2 AI agent (see [v2 AI agent](#v2-ai-agent)), with a facade that splits traffic between them for the canary. It runs locally, in Docker and on Cloud Run: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app (Swagger UI at [`/docs`](https://navcare-api-dev-471599020734.northamerica-northeast1.run.app/docs)). Anyone can reach it, but every path except `/v1/health` needs an API key (see [API keys and rate limit](#api-keys-and-rate-limit)). See [Deploy to Cloud Run](#deploy-to-cloud-run).
 
 ## Folders
 
@@ -16,7 +16,8 @@ app/services/        Routing (Google Routes), weather (Open-Meteo) and live ER s
 app/recommender_v1/  v1: rule-based ranking
 app/agent_v2/        v2: AI agent (Gemini on Vertex AI chooses the tools to call and the ERs)
 data/                Small sample data files (no personal information)
-deployment/          Google Cloud deployment files
+deployment/          Google Cloud deployment, smoke test and canary commands
+loadtest/            Load test and canary step check
 tests/               Automated tests
 docs/                Requirements checklist and AI usage log
 .github/workflows/   Lint and test checks on every push and pull request
@@ -78,6 +79,24 @@ Then open http://localhost:8080/docs. Docker's --env-file keeps inline comments 
 Errors always look like {"error": {"code": "...", "message": "...", "request_id": "..."}}: 400 invalid_parameter for bad query parameters, 503 data_unavailable when a data source fails, 500 internal_error for anything unexpected. 503 and 500 give clients a generic message; the real error is logged with the request_id.
 
 The `/v1` in the paths is the API version, not the recommender engine. v1 (rules) and v2 (AI agent) answer behind the same paths, and the `engine` field in each response says which one answered (`v1`, `v2`, or `v1_fallback` when v2 failed).
+
+### API keys and rate limit
+
+`/v1/recommendations` calls paid services (Google Routes, Gemini), so it and the hospital endpoints need a key in the `X-API-Key` header. `/v1/health`, `/docs` and `/openapi.json` stay open. In Swagger UI, click **Authorize** and paste your key.
+
+```bash
+curl -H "X-API-Key: <your key>" "https://<service-url>/v1/recommendations?lat=45.5017&lon=-73.5673"
+```
+
+- No key or a wrong key: 401 `unauthorized`. Over the limit: 429 `rate_limited` with `Retry-After` (seconds). Every answer to a valid key has `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+- Limit: 30 requests per minute per key, shared by all paths (`API_RATE_LIMIT_PER_MINUTE`), counted in memory in one-minute windows. Each Cloud Run instance counts on its own, so with 2 instances a key can get up to twice that. The window is fixed, so around a window change a key can make up to twice the limit within a few seconds.
+- Keys: the Secret Manager secret `NAVCARE_API_KEYS`, as comma-separated `name:key` pairs (for example `loadtest:...,demo:...,prof:...`). The log line has the key's name (`api_key_name`), never the key. To add or remove a key, add a new secret version and redeploy (or update the service) so new instances read it.
+- If the secret is missing the API refuses every recommendation (fail closed). Locally, set `API_KEYS_DISABLED=true` in `.env` to work without keys; never set it on Cloud Run.
+- The load test and smoke test send `NAVCARE_API_KEY` from the environment as `X-API-Key`.
+
+### Hospitals
+
+`GET /v1/hospitals` lists every ER in `data/hospitals.csv` with its latest MSSS status from the public ER feed (no Google Routes or Gemini call). Filters: `region` (as published by MSSS, any letter case) and `has_live_data` (true or false). `GET /v1/hospitals/{id}` returns one ER by its MSSS 8-digit code: 404 `not_found` for an unknown code, 400 for a code that is not 8 digits. Each ER has `region`, `specialised` (children's, mental-health or cardiology ERs, which v1 never ranks), `has_live_data` and `status` (null without live data). The answer also has `data_updated_at` and `stale`. If the ER feed fails, both endpoints answer 503 `data_unavailable`. The usual occupancy by hour needs the stored hourly snapshots (#21).
 
 ### Choosing v1 or v2 (facade)
 
@@ -191,10 +210,65 @@ environment variables; off by default; affects only requests routed to v2 (and `
 
 ```bash
 # Local: set both in .env and restart uvicorn; remove them and restart to stop.
-# Cloud Run (each change creates a new revision):
-gcloud run services update <service> --update-env-vars V2_FAULT_ENABLED=true,V2_FAULT_MODE=error                # on
-gcloud run services update <service> --remove-env-vars V2_FAULT_ENABLED,V2_FAULT_MODE,V2_FAULT_SLOW_SECONDS # off
+# Cloud Run (each change creates a new revision), see "Running a canary step":
+deployment/canary.sh fault error      # or: fault slow [seconds]
+deployment/canary.sh fault off
 ```
+
+### Running a canary step
+
+[docs/canary.md](docs/canary.md) has the criteria, steps and rules; these commands carry them out on Cloud Run.
+
+**Change the split** with [deployment/canary.sh](deployment/canary.sh). Each command prints the settings before
+and after (read back from the service), changes only the variables it names, and takes about a minute, since a
+new revision is deployed. It uses the same `ENV`, `PROJECT_ID`, `REGION` and `SERVICE` as `deploy.sh` (dev by
+default) and needs gcloud signed in with permission to update the service.
+
+```bash
+deployment/canary.sh status           # current share, fault settings and header setting; changes nothing
+deployment/canary.sh set 10           # promote: send 10 % of requests to v2 (whole numbers 0-100)
+deployment/canary.sh rollback         # all traffic back to v1 (V2_TRAFFIC_PERCENT=0)
+deployment/canary.sh fault error      # demo: v2 fails and v1 answers (v1_fallback)
+deployment/canary.sh fault slow 40    # demo: v2 waits 40 s first (1-60, default 35)
+deployment/canary.sh fault off
+```
+
+Every command warns while fault injection is on. Rollback leaves the fault settings as they are (v2 gets no
+traffic at 0 %); turn the fault off before the next promotion.
+
+**Check the step** with [loadtest/step_check.py](loadtest/step_check.py), after the step's load test:
+
+```bash
+# 1. Run the step (same command at every step, docs/canary.md)
+python -m loadtest.run --url https://<service-url> --engine split --rate 12 --duration 600 --max-requests 120 --no-compare --yes --out loadtest/results/step1.jsonl
+# 2. Run the check once without --logs: it prints the gcloud command for the step's time window
+python -m loadtest.step_check loadtest/results/step1.jsonl --percent 10
+# 3. Fetch the log lines with that command (wait a minute or two after the step), then check again
+python -m loadtest.step_check loadtest/results/step1.jsonl --percent 10 --logs logs.json --baseline loadtest/results/step0.jsonl
+```
+
+It prints PASS, FAIL, `n/a` or NOT CHECKED for criteria 1 to 6, a reminder to check criterion 7 (billing and
+budget alerts) by hand, the decision, the command to run next, and a row for the canary log in `docs/canary.md`.
+
+- **Decision:** ROLLBACK when a criterion whose action is rollback fails. HOLD when a hold criterion fails, a
+  criterion could not be checked, or the step had fewer than 8 v2 requests: run the same step again and pass
+  both results files (`step1.jsonl step1b.jsonl`). PROMOTE when every criterion passes. In the 0 % baseline
+  step every failure is a hold, since there is nothing to roll back. Exit code 0 promote, 1 rollback, 3 hold,
+  2 when a file cannot be read.
+- **Log lines** (`--logs`): results are matched to them by request id, so other traffic in the window is left
+  out. They say which engine served every request, errors included, and carry the server latency and the model
+  cost. Without them, criteria 1 and 3 use the results alone (an error that does not say its engine leaves
+  criterion 1 not checked), and criterion 6 is not checked. A local server's JSON log lines also work.
+- **Baseline** (`--baseline`): the 0 % step's results, needed for criterion 2 from step 1 on.
+- **Cost** (criterion 6) comes from `model_cost_usd` in the log lines, which needs a deployed revision with the
+  cost estimate (#41, #45). Until then it is NOT CHECKED, so the decision is at best HOLD. It is also NOT
+  CHECKED (HOLD) when any v2 request has `model_cost_unknown` (a 503, a 500 or a failed model call), as the
+  dashboard's "INCOMPLETE: hold"; known costs over $0.05 on their own still mean ROLLBACK.
+- **Correctness:** a `v1_fallback` answer is v1's code, so it is held to v1's 100 %.
+- **Publish** (`--publish`): also writes the correctness counts to Cloud Logging for the dashboard's criterion 5 tile and alert (see [Canary dashboard](#canary-dashboard)). Each step is published once: a later run on the same results (the re-run with `--logs`, say) finds the step's entries and doesn't write them again. If gcloud fails it says so, and the exit code is still the decision's.
+
+For the demo's rollback: `canary.sh set 10`, `canary.sh fault error`, run the step, and the check reports
+criterion 1 failed and ROLLBACK; then `canary.sh rollback` and `canary.sh fault off`.
 
 ## v2 AI agent
 
@@ -249,13 +323,48 @@ cost nothing.
 
 ## Deploy to Cloud Run
 
-Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key comes from Secret Manager.
+Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 2026-11-22: https://navcare-api-dev-471599020734.northamerica-northeast1.run.app), run as `navcare-run`; the Maps key and the API keys (`NAVCARE_API_KEYS`) come from Secret Manager, and both secrets must exist before a deploy.
 
 - `deployment/deploy.sh` builds the committed code (`HEAD`) with Cloud Build, pushes it to Artifact Registry (`navcare`) and deploys it. Run it from Git Bash or a Unix shell with gcloud signed in (`CLOUDSDK_CORE_ACCOUNT` picks the account; `GCLOUD` the gcloud path).
 - Settings: 1 vCPU, 512 MiB (the app uses about 200 MiB), concurrency 40 (the server's worker threads), timeout 120 s (v2's 60 s Gemini budget plus tools and the v1 fallback), 0 to 2 instances. The instance cap limits exposure; it is not a spending cap.
 - `V2_TRAFFIC_PERCENT=0` is set only when the service is created, so a redeploy keeps the canary share. Fault injection stays off. `ENGINE_HEADER_ENABLED` is off unless set to `true` for a controlled dev test; turn it off again afterwards (`gcloud run services update navcare-api-dev --region=northamerica-northeast1 --update-env-vars=ENGINE_HEADER_ENABLED=false`).
 - The script never changes who can call the service. The first deploy needs two project-owner steps: give Cloud Build's default service account `roles/cloudbuild.builds.builder` (the organization blocks automatic grants), and after a private smoke test give `allUsers` `roles/run.invoker` on the service.
-- Check a deploy with `python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
+- Check a deploy with `NAVCARE_API_KEY=<a key> python -m deployment.smoke_test <url>` (one paid v1 request); add `--v2` in dev for one forced v2 request. A 200 is not enough: the engine and the correctness checker must pass.
+
+### Automatic deploys to dev (CI/CD)
+
+Every merge to `main` deploys `navcare-api-dev` (`.github/workflows/deploy.yml`, #30):
+
+```
+merge to main → ruff + pytest → deploy.sh → check the image is this commit → smoke test (v1)
+```
+
+- **Results:** Actions tab, "Deploy dev". A failed check means no deploy. A failed smoke test leaves the new revision serving, so fix it or roll back (below).
+- **Manual redeploy of `main`:** Actions > Deploy dev > Run workflow.
+- **One at a time:** a deploy is never cancelled, and the next merge waits for it. If several merges wait, only the newest is deployed, since it includes the others.
+- **Pause:** set the repository variable `DEPLOY_PAUSED` to `true` during canary steps (#29) and the demo; the checks still run. A new revision in the middle of a canary step changes that step's latency and counts, even though the share is kept. Remember to set it back to `false`.
+- **Cost:** one Cloud Build run and one paid v1 request per merge; never a forced v2.
+- **Only dev:** prod stays manual (`ENV=prod deployment/deploy.sh`). `ENGINE_HEADER_ENABLED` stays off and the canary share is kept, as with a manual deploy.
+
+**Rollback:** deploy an earlier image. This makes a new revision with the current settings (find the tags in Artifact Registry > `navcare` > `api`, or use the short commit hash):
+
+```bash
+gcloud run deploy navcare-api-dev --region=northamerica-northeast1 \
+  --image=northamerica-northeast1-docker.pkg.dev/project-69a1b17d-f37d-485c-912/navcare/api:<earlier-commit>
+```
+
+Then set `DEPLOY_PAUSED=true` until the fix is merged, or the next merge deploys `main` again. Don't send traffic to an old revision instead: each revision keeps its own env vars, so that would also bring back an old `V2_TRAFFIC_PERCENT`.
+
+**Sign-in:** GitHub signs in as the `github-deployer` service account with Workload Identity Federation. Google accepts only pushes and manual runs on `main` of this repository, and no key file exists. The deployer can deploy Cloud Run (and call the service with an ID token for the smoke test, so it also works if the service is made private), submit Cloud Build builds, read Artifact Registry and upload to the Cloud Build bucket, nothing more. `deploy.sh` gets `BUILD_LOGS=false` (no log streaming, which would need project Viewer; the logs stay in Cloud Build) and `STAGING_BUCKET` (so it needs no project-wide bucket listing).
+
+**One-time setup** (project Owner only: Editors can't grant roles):
+
+```bash
+deployment/setup_ci.sh --dry-run   # prints every change, makes none
+deployment/setup_ci.sh             # safe to run again
+```
+
+It prints two values to save as repository variables (Settings > Secrets and variables > Actions > Variables): `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_DEPLOYER_SA`. The smoke test also needs an API key (`/v1/recommendations` answers 401 without one): add a `ci` key to the `NAVCARE_API_KEYS` secret in Secret Manager and save the same key as the repository **secret** (not a variable, so Actions masks it in the logs) `NAVCARE_API_KEY`. Until all three are set, the deploy job fails before deploying, with a message saying what's missing. If a deploy is denied a permission, add only that role in `setup_ci.sh` and run it again.
 
 ## Canary dashboard
 
@@ -267,7 +376,35 @@ Target: dev service `navcare-api-dev` in `northamerica-northeast1` (deployed 202
 - Went to v2: `v2` or `v1_fallback`. A v2 failure: `v1_fallback`, or `v2` with status 500. 503s are left out of criteria 1 and 3.
 - No traffic shows a gap, not a pass. Counts come from `increase()`, which extrapolates and can be fractional, so the 20-request and 1-failure lines are approximate; `loadtest/step_check.py` counts exactly and decides.
 - Cost covers Gemini tokens only, over every line that went to v2 (criterion 6). A v2 503 or 500, a failed model call or one without token counts has an unknown cost. The known average is drawn as "complete", or as "INCOMPLETE: hold" when anything in the step is unknown; unknown counts by status are next to it.
-- Criteria 2, 5 and 7 come from `results.jsonl` and the billing report, not the dashboard.
+- Criterion 5 (correctness) is fed in by the step check: `python -m loadtest.step_check ... --publish` writes the step's checked and correct counts (v2, and v1 with its fallbacks) to Cloud Logging with `gcloud logging write`. The `correctness_checked` and `correctness_correct` metrics read them, and the tile shows each group's % with the 95 % line. One point per step, timed when it was published, so publish right after the step; running it again on the same results doesn't publish twice (each entry has a `step_id` from the results). Steps published less than 10 minutes apart add up into one point, so leave 10 minutes between steps (the canary's steps already do). It uses the same `PROJECT_ID`/`SERVICE`/`ENV` as the printed `gcloud logging read` command.
+- Criteria 2 and 7 come from `results.jsonl` and the billing report, not the dashboard.
+
+### Alerts
+
+`deployment/monitoring/alerts/` holds the Cloud Monitoring alert policies for the dashboard's criteria, one condition each (Cloud Monitoring allows only one PromQL condition per policy, so criteria 1 and 5 have a second policy for small steps). Each condition is the chart's own PromQL query compared with the chart's threshold line, and `tests/test_monitoring.py` checks they stay identical.
+
+| Policy | Fires when (last 10 min) | Severity | docs/canary.md action |
+| --- | --- | --- | --- |
+| Criterion 1 | v2 failure rate > 5 % with 20+ v2 requests, or 2+ v2 failures with fewer | CRITICAL | rollback (hold if there are 503s) |
+| Criterion 3 | v2 p95 latency > 30 s | CRITICAL | rollback |
+| Criterion 4 | v1 p95 latency > 5 s | WARNING | hold and investigate |
+| Criterion 5 | v2 correct < 95 % with 20+ answers, or 2+ wrong with fewer | CRITICAL | rollback |
+| Criterion 5 (v1) | v1 correct < 100 % | WARNING | hold |
+| Criterion 6 | known average model cost > $0.05 per v2 request | CRITICAL | rollback |
+
+- `ALERT_EMAILS="a@example.com,b@example.com" deployment/monitoring/apply.sh` creates or updates them with one email channel per address (an existing channel for that address is reused; addresses are lowercased). An update sets each policy's channels to exactly that list. Without `ALERT_EMAILS`, existing policies keep the channels they have (so running it again for a dashboard change doesn't stop the emails), and new ones open incidents in the console but email no one. `ALERT_EMAILS=none` removes every channel.
+- An alert is a prompt to run the step check, not the decision: counts come from `increase()` and are approximate. Each email links the action from docs/canary.md and the step check command.
+- Criterion 7 is covered by the project's budget alerts (#16).
+- Alert policies and channels need `gcloud beta` (`gcloud components install beta`).
+- On Windows (Git Bash), if gcloud is installed under a path with spaces such as `Cloud SDK`, point `GCLOUD` at its short path (`GCLOUD=C:/Users/<you>/AppData/Local/Google/CLOUDS~2/GOOGLE~1/bin/gcloud.cmd`), or `cmd` splits the path when an argument contains quotes.
+
+### Showing it live (issue #27)
+
+1. `ALERT_EMAILS=... deployment/monitoring/apply.sh` (once per service; metrics only count lines written after they exist).
+2. Run a canary step with v2 traffic, for example `deployment/canary.sh set 50` and the load test from [docs/canary.md](docs/canary.md#steps).
+3. Right after it: `python -m loadtest.step_check <results.jsonl> --percent 50 --baseline <step0.jsonl> --publish`. Then fetch the log lines with the command it prints and run it again with `--logs logs.json` for the decision (that run doesn't publish the step again).
+4. Open Monitoring → Dashboards → "NavCare canary: navcare-api-dev" and set the time range to cover the step. v1 and v2 should show side by side in every tile, with correctness a few minutes after step 3. Take the screenshot for the issue.
+5. Optional, to see an alert fire: `deployment/canary.sh fault error`, run a short step, wait for the criterion 1 email, then `deployment/canary.sh fault off` and `deployment/canary.sh rollback`.
 
 ## Hospital and ER data
 

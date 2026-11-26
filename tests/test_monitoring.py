@@ -18,6 +18,8 @@ from app import cost_estimates
 from app.agent_v2 import ai_agent_recommender as agent
 from app.api import facade, main
 from app.api.main import app
+from loadtest import step_check
+from tests import test_step_check as step_samples
 
 REPO = Path(__file__).resolve().parents[1]
 MONITORING = REPO / "deployment" / "monitoring"
@@ -38,6 +40,15 @@ DASHBOARD = json.loads(render(DASHBOARD_TEMPLATE))
 CHARTS = {tile["widget"]["title"]: tile["widget"] for tile in DASHBOARD["mosaicLayout"]["tiles"]}
 BASE_FILTER = ('resource.type="cloud_run_revision" AND resource.labels.service_name='
                '"navcare-api-dev" AND jsonPayload.event="recommendation"')
+CORRECTNESS_FILTER = ('resource.type="global" AND jsonPayload.event="canary_correctness" AND '
+                      'jsonPayload.service="navcare-api-dev"')
+REQUEST_METRICS = {"requests", "latency_ms", "prompt_tokens", "output_tokens", "model_cost_usd",
+                   "model_cost_unknown"}
+CORRECTNESS_METRICS = {"correctness_checked", "correctness_correct"}  # step_check.py --publish
+ALERT_TEMPLATES = {path.stem: path.read_text(encoding="utf-8")
+                   for path in sorted((MONITORING / "alerts").glob("*.json"))}
+ALERTS = {stem: json.loads(render(text)) for stem, text in ALERT_TEMPLATES.items()}
+C5_TITLE = "Criterion 5: correctness % per group (from step_check.py --publish)"
 COST_TITLE = "Criterion 6: estimated model-token cost per v2 request (USD, known estimates)"
 COUNTS_TITLE = "Cost estimates: known vs unknown by status (requests that went to v2)"
 MONTREAL = {"lat": 45.5017, "lon": -73.5673}
@@ -147,12 +158,16 @@ def test_an_unpriced_location_is_unknown(monkeypatch, caplog):
 # Metric definitions, and what they count from real log lines
 
 
-def matches(log_filter, fields, service=SERVICE):
-    """Evaluate one of our metric filters (AND of simple clauses) on a log line's fields."""
+def matches(log_filter, fields, service=SERVICE, resource="cloud_run_revision"):
+    """Evaluate one of our metric filters (AND of simple clauses) on a log line's fields.
+
+    resource: the entry's resource type. The API's lines are Cloud Run's; `gcloud logging write`
+    (step_check.py --publish) writes "global" entries.
+    """
     for clause in log_filter.split(" AND "):
         name, op, value = re.match(r"(\S+?)(:\*|!=|>=|=)(.*)", clause.strip()).groups()
         if name == "resource.type":
-            ok = value == '"cloud_run_revision"'
+            ok = value == f'"{resource}"'
         elif name == "resource.labels.service_name":
             ok = value == f'"{service}"'
         else:
@@ -199,13 +214,13 @@ def unknown_by_status(lines):
     return dict(by_status)
 
 
-def test_every_metric_reads_this_services_recommendation_lines_by_engine():
-    assert set(TEMPLATES) == {"requests", "latency_ms", "prompt_tokens", "output_tokens",
-                              "model_cost_usd", "model_cost_unknown"}
-    for metric in METRICS.values():
-        assert metric["filter"].startswith(BASE_FILTER)
+def test_every_metric_reads_this_services_lines_by_engine():
+    assert set(TEMPLATES) == {*REQUEST_METRICS, *CORRECTNESS_METRICS}
+    for stem, metric in zip(TEMPLATES, METRICS.values()):
+        base = BASE_FILTER if stem in REQUEST_METRICS else CORRECTNESS_FILTER
+        assert metric["filter"].startswith(base)
         assert metric["labelExtractors"]["engine"] == "EXTRACT(jsonPayload.engine)"
-    for text in [*TEMPLATES.values(), DASHBOARD_TEMPLATE]:
+    for text in [*TEMPLATES.values(), DASHBOARD_TEMPLATE, *ALERT_TEMPLATES.values()]:
         assert "navcare-api-dev" not in text  # the service comes from apply.sh
 
 
@@ -213,6 +228,9 @@ def test_metrics_only_use_fields_the_app_logs(monkeypatch, caplog):
     lines = [log_line(monkeypatch, caplog),
              log_line(monkeypatch, caplog, engine="v1_fallback", usage=None)]
     for name, metric in METRICS.items():
+        if name.removeprefix("navcare_api_dev_") in CORRECTNESS_METRICS:
+            continue  # written by the step check: test_correctness_metrics_read_the_step_check
+
         text = " ".join([metric["filter"], metric.get("valueExtractor", ""),
                          *metric["labelExtractors"].values()])
         for path in re.findall(r"jsonPayload\.([\w.]+)", text):
@@ -318,6 +336,7 @@ def test_thresholds_match_docs_canary_md():
     assert thresholds("Criterion 3: v2 p95 latency (v2 and v1_fallback, ms)") == [v2_p95_s * 1000]
     assert thresholds("Criterion 4: v1 p95 latency (ms)") == [v1_p95_s * 1000]
     assert thresholds(COST_TITLE) == [cost]
+    assert thresholds(C5_TITLE) == [float(re.search(r"v2 ≥ (\d+) %", rows[5]).group(1))]
 
 
 def test_v2_failures_count_fallbacks_and_500s_over_v2_routed_requests_without_503s():
@@ -343,13 +362,25 @@ def test_no_traffic_never_draws_a_pass():
                     assert "vector(0)" not in drawn.split(" / ", 1)[1], title
 
 
-def test_every_selector_names_the_monitored_resource():
-    # Log-based metrics need it in PromQL (Cloud Monitoring's PromQL mapping docs).
+def all_queries():
+    """(where, query) for every chart and alert condition."""
     for title, chart in CHARTS.items():
         if "xyChart" in chart:
             for query in queries(title):
-                for selector in re.findall(r"user_navcare_\w+(\{[^}]*\}|\[)", query):
-                    assert 'monitored_resource="cloud_run_revision"' in selector, title
+                yield title, query
+    for stem, policy in ALERTS.items():
+        for condition in policy["conditions"]:
+            yield stem, condition["conditionPrometheusQueryLanguage"]["query"]
+
+
+def test_every_selector_names_the_monitored_resource():
+    # Log-based metrics need it in PromQL (Cloud Monitoring's PromQL mapping docs). The step
+    # check's entries are written with `gcloud logging write`, so their resource is "global".
+    for where, query in all_queries():
+        for metric, selector in re.findall(r"user_navcare_api_dev_(\w+?)(\{[^}]*\}|\[)", query):
+            stem = re.sub(r"_(bucket|sum|count)$", "", metric)
+            resource = "global" if stem in CORRECTNESS_METRICS else "cloud_run_revision"
+            assert f'monitored_resource="{resource}"' in selector, where
 
 
 def test_cost_average_stays_visible_and_is_marked_incomplete_when_any_cost_is_unknown():
@@ -378,6 +409,218 @@ def test_reading_note_explains_end_time_approximate_counts_and_incomplete_cost()
         assert phrase in note
 
 
+# Criterion 5: correctness counts published by the step check
+
+
+def published(records, percent=10):
+    """The entries step_check.py --publish would write for these results."""
+    result = step_check.evaluate(records, percent)
+    return result, step_check.correctness_entries(result, SERVICE)
+
+
+def sums(entries, stem):
+    """What a correctness metric's _sum adds up per group, from the entries it matches."""
+    metric = METRICS[f"navcare_api_dev_{stem}"]
+    field = metric["valueExtractor"][len("EXTRACT(jsonPayload."):-1]
+    totals = Counter()
+    for entry in entries:
+        if matches(metric["filter"], entry, resource="global"):
+            totals[labels(metric, entry)[0]] += entry[field]
+    return totals
+
+
+def test_correctness_metrics_read_the_step_check_entries():
+    records, _ = step_samples.step((10, {}), (2, {"engine": "v1_fallback"}),
+                                   (18, {"engine": "v2"}), (2, {"engine": "v2", "wrong": True}))
+    result, entries = published(records)
+
+    assert sums(entries, "correctness_checked") == {"v2": 20, "v1": 12}
+    assert sums(entries, "correctness_correct") == {"v2": 18, "v1": 12}
+    # The chart's ratio of sums is criterion 5's own figure.
+    v2_cell, v1_cell = next(c["cell"] for c in result["criteria"] if c["number"] == 5)
+    assert (v2_cell, v1_cell) == ("90.0 %", "100.0 %")
+    # Another service's entries, and the API's own lines, are left out.
+    other = step_check.correctness_entries(result, "navcare-api-prod")
+    assert sums(other, "correctness_checked") == {}
+    for stem in CORRECTNESS_METRICS:
+        assert not matches(METRICS[f"navcare_api_dev_{stem}"]["filter"], entries[0])
+
+
+def test_a_group_with_no_answers_publishes_nothing():
+    records, _ = step_samples.step((12, {}))  # the 0 % baseline: v1 only
+
+    _, entries = published(records, percent=0)
+
+    assert [(e["engine"], e["checked"]) for e in entries] == [("v1", 12)]
+
+
+def fake_gcloud_run(calls, already_published=""):
+    """A subprocess.run for publish_correctness: `logging read` prints already_published."""
+    def run(args, **kwargs):
+        calls.append(args)
+        out = already_published if "read" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+    return run
+
+
+def test_publish_writes_one_gcloud_entry_per_group(monkeypatch):
+    calls = []
+    monkeypatch.setenv("PROJECT_ID", "p-1")
+    monkeypatch.setenv("SERVICE", "navcare-api-prod")
+    records, _ = step_samples.step((3, {}), (2, {"engine": "v2"}))
+    result = step_check.evaluate(records, 10)
+
+    entries, written = step_check.publish_correctness(result, run=fake_gcloud_run(calls))
+
+    assert written
+    read, *writes = calls
+    # First it looks for this step's entries, so a second --publish can't double the counts.
+    assert read[1:5] == ["--project=p-1", "--quiet", "logging", "read"]
+    assert read[5] == step_check.published_query("p-1", "navcare-api-prod", result["step_id"])
+    assert f'jsonPayload.step_id="{result["step_id"]}"' in read[5]
+    assert len(writes) == len(entries) == 2
+    for args, entry in zip(writes, entries):
+        assert args[1:6] == ["--project=p-1", "--quiet", "logging", "write",
+                             step_check.CORRECTNESS_LOG]
+        assert json.loads(args[6]) == entry and entry["service"] == "navcare-api-prod"
+        assert entry["step_id"] == result["step_id"]
+        assert args[7] == "--payload-type=json"
+
+
+def test_a_step_already_published_is_not_written_again(tmp_path, monkeypatch, capsys):
+    # The usual second run (with --logs) must not add the step's counts again: 15 v2 answers
+    # with 1 wrong pass, but twice over they read as 28/30 = 93 % and fire criterion 5.
+    calls = []
+    monkeypatch.setattr(step_check.subprocess, "run", fake_gcloud_run(calls, "insert-id-1\n"))
+    records, _ = step_samples.step((5, {}), (14, {"engine": "v2"}),
+                                   (1, {"engine": "v2", "wrong": True}))
+    results = step_samples.write_results(tmp_path / "step.jsonl", records)
+
+    step_check.main([results, "--percent", "50", "--publish"])
+
+    assert [args[4] for args in calls] == ["read"]  # no write
+    assert "Not published again" in capsys.readouterr().out
+
+
+def test_step_id_is_the_same_for_the_same_step_only():
+    records, _ = step_samples.step((10, {}), (2, {"engine": "v2"}))
+    more, _ = step_samples.step((3, {"engine": "v2"}))
+
+    assert step_check.step_id(records, 10) == step_check.step_id(list(reversed(records)), 10)
+    assert step_check.step_id(records, 10) != step_check.step_id(records, 25)
+    assert step_check.step_id(records, 10) != step_check.step_id(records + more, 10)  # a re-run
+
+
+def test_publish_failure_is_reported_and_the_decision_stands(tmp_path, monkeypatch, capsys):
+    def fail(args, **kwargs):
+        raise subprocess.CalledProcessError(1, args, stderr="PERMISSION_DENIED")
+
+    records, _ = step_samples.step((12, {}))
+    results = step_samples.write_results(tmp_path / "step0.jsonl", records)
+    decision = step_check.main([results, "--percent", "0"])
+    capsys.readouterr()
+    monkeypatch.setattr(step_check.subprocess, "run", fail)
+
+    assert step_check.main([results, "--percent", "0", "--publish"]) == decision
+    err = capsys.readouterr().err
+    assert "Could not publish the correctness counts" in err and "PERMISSION_DENIED" in err
+    assert "the decision above still stands" in err
+
+
+def test_correctness_chart_follows_criterion_5():
+    v2, v1 = queries(C5_TITLE)
+    for query, group in ((v2, "v2"), (v1, "v1")):
+        numerator, denominator = query.split(" / ")
+        assert numerator.startswith("100 * sum(increase(")
+        assert "correctness_correct_sum" in numerator
+        assert "correctness_checked_sum" in denominator
+        assert all(f'engine="{group}"' in part for part in (numerator, denominator))
+    correct = float(re.search(r"v2 ≥ (\d+) %", canary_criteria()[5]).group(1))
+    assert thresholds(C5_TITLE) == [correct]
+
+
+# Alert policies
+
+
+def conditions(stem):
+    return [c["conditionPrometheusQueryLanguage"]["query"] for c in ALERTS[stem]["conditions"]]
+
+
+C1_RATE = "Criterion 1: v2 failure rate (%), shown from about 20 v2 requests"
+C1_SMALL = "Criterion 1 (small steps): v2 failures (approx.)"
+C3_TITLE = "Criterion 3: v2 p95 latency (v2 and v1_fallback, ms)"
+C4_TITLE = "Criterion 4: v1 p95 latency (ms)"
+
+
+def test_one_policy_per_dashboard_criterion_with_the_docs_action():
+    # Rollback criteria are CRITICAL; hold criteria (4, and v1 correctness) WARNING.
+    assert {stem: policy["severity"] for stem, policy in ALERTS.items()} == {
+        "criterion_1_v2_failure_rate": "CRITICAL",
+        "criterion_1_small_step_failures": "CRITICAL",
+        "criterion_3_v2_p95": "CRITICAL",
+        "criterion_4_v1_p95": "WARNING",
+        "criterion_5_v2_correctness": "CRITICAL",
+        "criterion_5_small_step_wrong": "CRITICAL",
+        "criterion_5_v1_correctness": "WARNING",
+        "criterion_6_v2_cost": "CRITICAL",
+    }
+    for stem, policy in ALERTS.items():
+        doc = policy["documentation"]["content"]
+        action = "rollback" if policy["severity"] == "CRITICAL" else "hold and investigate"
+        assert f"**Action (docs/canary.md): {action}" in doc, stem
+        assert "step check" in doc, stem  # an alert prompts the check; it doesn't decide
+    names = [policy["displayName"] for policy in ALERTS.values()]
+    assert len(set(names)) == len(names)
+    assert all(name.startswith("NavCare canary (navcare-api-dev): ") for name in names)
+
+
+def test_policies_are_templates_apply_sh_can_fill():
+    for stem, text in ALERT_TEMPLATES.items():
+        policy = json.loads(text)
+        assert policy["notificationChannels"] == [], stem  # apply.sh fills in ALERT_EMAILS
+        assert '"notificationChannels": []' in text, stem  # the exact text its sed replaces
+        assert re.search(r'^  "displayName": ".*",$', text, re.M), stem  # what it reads back
+        assert policy["userLabels"] == {"app": "navcare", "service": "__SERVICE__"}
+        assert policy["combiner"] == "OR"
+        # Cloud Monitoring allows only one condition in a policy with a PromQL condition.
+        assert len(policy["conditions"]) == 1, stem
+
+
+def test_alert_conditions_are_the_dashboard_queries_at_its_thresholds():
+    # The same query and line as the chart, so an alert and the chart can't disagree.
+    def is_chart_over(stem, title, value):
+        assert conditions(stem) == [f"({queries(title)[0]}) > {value:g}"], stem
+
+    (rate,) = thresholds(C1_RATE)
+    is_chart_over("criterion_1_v2_failure_rate", C1_RATE, rate)
+    is_chart_over("criterion_3_v2_p95", C3_TITLE, *thresholds(C3_TITLE))
+    is_chart_over("criterion_4_v1_p95", C4_TITLE, *thresholds(C4_TITLE))
+
+    (small,) = conditions("criterion_1_small_step_failures")
+    (requests_line,) = thresholds("Requests that went to v2 (without 503s, approx.)")
+    went_to_v2 = queries("Requests that went to v2 (without 503s, approx.)")[0]
+    assert small == (f"({queries(C1_SMALL)[0]} and on() ({went_to_v2} < {requests_line:g})) "
+                     f"> {thresholds(C1_SMALL)[0]:g}")
+
+    (cost,) = conditions("criterion_6_v2_cost")
+    known_average = queries(COST_TITLE)[0].split(" and on() ")[0]
+    assert cost == f"({known_average}) > {thresholds(COST_TITLE)[0]:g}"  # unknowns don't hide it
+
+    (v2_correct,) = conditions("criterion_5_v2_correctness")
+    (v2_wrong,) = conditions("criterion_5_small_step_wrong")
+    (v2_pct, v1_pct), (line,) = queries(C5_TITLE), thresholds(C5_TITLE)
+    assert v2_correct.startswith(f"({v2_pct} and on() (") and v2_correct.endswith(
+        f" >= {requests_line:g})) < {line:g}")
+    assert v2_wrong.endswith(f" < {requests_line:g})) > 1")
+    assert conditions("criterion_5_v1_correctness") == [f"({v1_pct}) < 100"]
+
+
+def test_alerts_only_use_defined_metrics():
+    used = {re.sub(r"_(bucket|sum|count)$", "", name) for _, query in all_queries()
+            for name in re.findall(r"logging_googleapis_com:user_(\w+)", query)}
+    assert used <= set(METRICS)
+
+
 # apply.sh with a fake gcloud (no cloud calls)
 
 FAKE_GCLOUD = """#!/usr/bin/env bash
@@ -386,16 +629,25 @@ keep() {  # keep each config that was sent, by the name of the file
   for arg in "$@"; do
     case "$arg" in
       --config-from-file=*) cp "${arg#--config-from-file=}" "$FAKE_DIR/" ;;
+      --policy-from-file=*) cp "${arg#--policy-from-file=}" "$FAKE_DIR/" ;;
     esac
   done
 }
 case "$*" in
   *" logging metrics describe "*)
     [ "$FAKE_EXISTS" = 1 ] || exit 1
-    echo "resource.labels.service_name=\\"$FAKE_METRIC_SERVICE\\" AND more" ;;
+    echo "${FAKE_FILTER_KEY:-resource.labels.service_name}=\\"$FAKE_METRIC_SERVICE\\" AND more" ;;
   *" monitoring dashboards list "*) printf '%s' "$FAKE_DASHBOARDS" ;;
   *" monitoring dashboards describe "*) printf '%s' "$FAKE_ETAG" ;;
-  *" logging metrics "*|*" monitoring dashboards "*) keep "$@" ;;
+  *" monitoring channels list "*"email_address=\\"old@example.com\\""*)
+    echo "projects/1/notificationChannels/old" ;;
+  *" monitoring channels list "*) ;;
+  *" monitoring channels create "*) echo "projects/1/notificationChannels/new" ;;
+  *" monitoring policies list "*) printf '%s' "$FAKE_POLICIES" ;;
+  *" monitoring policies describe "*)
+    [ "${FAKE_DESCRIBE_FAILS:-0}" = 1 ] && exit 1
+    printf '%s' "${FAKE_POLICY_CHANNELS:-}" ;;
+  *" logging metrics "*|*" monitoring dashboards "*|*" monitoring policies "*) keep "$@" ;;
 esac
 exit 0
 """
@@ -404,7 +656,7 @@ needs_bash = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Wi
 
 
 def apply(tmp_path, service=None, exists=False, metric_service=SERVICE, dashboards="",
-          etag="abc123"):
+          etag="abc123", alert_emails=None, policies="", policy_channels=""):
     fake = tmp_path / "gcloud"
     fake.write_text(FAKE_GCLOUD, newline="\n")
     fake.chmod(0o755)
@@ -415,11 +667,14 @@ def apply(tmp_path, service=None, exists=False, metric_service=SERVICE, dashboar
     env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
            "FAKE_DIR": sent.as_posix(), "FAKE_EXISTS": "1" if exists else "0",
            "FAKE_METRIC_SERVICE": metric_service, "FAKE_DASHBOARDS": dashboards,
-           "FAKE_ETAG": etag, "TMPDIR": temp.as_posix()}
-    env.pop("PROJECT_ID", None)
-    env.pop("SERVICE", None)
+           "FAKE_ETAG": etag, "FAKE_POLICIES": policies, "TMPDIR": temp.as_posix(),
+           "FAKE_POLICY_CHANNELS": policy_channels}
+    for name in ("PROJECT_ID", "SERVICE", "ALERT_EMAILS"):
+        env.pop(name, None)
     if service:
         env["SERVICE"] = service
+    if alert_emails is not None:
+        env["ALERT_EMAILS"] = alert_emails
     result = subprocess.run([BASH, "deployment/monitoring/apply.sh"], cwd=REPO, env=env,
                             capture_output=True, text=True, timeout=60)
     calls = log.read_text().splitlines() if log.exists() else []
@@ -453,7 +708,13 @@ def test_another_service_gets_its_own_metrics_and_dashboard(tmp_path):
     names = {Path(p).stem for p in os.listdir(sent) if p.endswith(".yaml")}
     assert names == {f"navcare_api_prod_{stem}" for stem in TEMPLATES}
     for name in names:
-        assert 'service_name="navcare-api-prod"' in (sent / f"{name}.yaml").read_text()
+        key = ("jsonPayload.service" if name.removeprefix("navcare_api_prod_")
+               in CORRECTNESS_METRICS else "resource.labels.service_name")
+        assert f'{key}="navcare-api-prod"' in (sent / f"{name}.yaml").read_text()
+    for stem in ALERT_TEMPLATES:
+        policy = json.loads((sent / f"{stem}.json").read_text())
+        assert policy["displayName"].startswith("NavCare canary (navcare-api-prod): ")
+        assert "navcare_api_dev" not in json.dumps(policy)
     prod = json.loads((sent / "dashboard.json").read_text())
     assert prod == json.loads(render(DASHBOARD_TEMPLATE, "navcare-api-prod"))
     assert prod["displayName"] == "NavCare canary: navcare-api-prod"
@@ -493,3 +754,125 @@ def test_apply_rejects_a_bad_service_name(tmp_path, service):
 
     assert result.returncode != 0 and "SERVICE must be a Cloud Run service name" in result.stderr
     assert calls == []
+
+
+def policy_calls(calls, verb):
+    return [c for c in calls if f" beta monitoring policies {verb} " in f" {c} "]
+
+
+@needs_bash
+def test_apply_creates_every_alert_policy_emailing_alert_emails(tmp_path):
+    result, calls, sent, _ = apply(tmp_path, alert_emails=" old@example.com, new@example.com ,")
+
+    assert result.returncode == 0, result.stderr
+    # An existing channel is reused; a missing one is created, once.
+    creates = [c for c in calls if "monitoring channels create" in c]
+    assert len(creates) == 1 and "--channel-labels=email_address=new@example.com" in creates[0]
+    assert len(policy_calls(calls, "create")) == len(ALERTS) and not policy_calls(calls, "update")
+    for stem, policy in ALERTS.items():
+        assert json.loads((sent / f"{stem}.json").read_text()) == {
+            **policy, "notificationChannels": ["projects/1/notificationChannels/old",
+                                               "projects/1/notificationChannels/new"]}
+        assert any(f'--filter=displayName="{policy["displayName"]}"' in c for c in calls)
+
+
+@needs_bash
+def test_apply_without_alert_emails_still_applies_the_policies_and_says_so(tmp_path):
+    result, calls, sent, _ = apply(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "email no one" in result.stderr
+    assert not any("monitoring channels" in c for c in calls)
+    for stem, policy in ALERTS.items():
+        assert json.loads((sent / f"{stem}.json").read_text()) == policy
+
+
+@needs_bash
+def test_apply_without_alert_emails_keeps_the_channels_policies_have(tmp_path):
+    # Applying again for a dashboard change must not stop the alert emails.
+    channels = "projects/1/notificationChannels/a;projects/1/notificationChannels/b"
+    result, calls, sent, _ = apply(tmp_path, policies="projects/1/alertPolicies/7",
+                                   policy_channels=channels)
+
+    assert result.returncode == 0, result.stderr
+    assert "keep their email channels" in result.stderr
+    assert not any("monitoring channels" in c for c in calls)
+    for stem, policy in ALERTS.items():
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == [
+            "projects/1/notificationChannels/a", "projects/1/notificationChannels/b"], stem
+
+
+@needs_bash
+def test_apply_stops_when_it_cannot_read_a_policys_channels(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_DESCRIBE_FAILS", "1")
+    result, calls, _, _ = apply(tmp_path, policies="projects/1/alertPolicies/7")
+
+    assert result.returncode != 0
+    assert not policy_calls(calls, "update")  # not updated with its channels cleared
+
+
+@needs_bash
+@pytest.mark.parametrize("value", ["none", " None "])
+def test_alert_emails_none_removes_the_channels(tmp_path, value):
+    result, calls, sent, _ = apply(tmp_path, alert_emails=value,
+                                   policies="projects/1/alertPolicies/7",
+                                   policy_channels="projects/1/notificationChannels/a")
+
+    assert result.returncode == 0, result.stderr
+    assert "email no one" in result.stderr
+    assert not any("policies describe" in c or "monitoring channels" in c for c in calls)
+    for stem in ALERTS:
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == []
+
+
+@needs_bash
+def test_alert_emails_in_another_case_reuse_the_channel(tmp_path):
+    result, calls, sent, _ = apply(tmp_path, alert_emails="Old@Example.COM")
+
+    assert result.returncode == 0, result.stderr
+    assert not any("channels create" in c for c in calls)
+    for stem in ALERTS:
+        assert json.loads((sent / f"{stem}.json").read_text())["notificationChannels"] == [
+            "projects/1/notificationChannels/old"]
+
+
+@needs_bash
+def test_apply_updates_existing_policies_in_place(tmp_path):
+    result, calls, _, _ = apply(tmp_path, policies="projects/1/alertPolicies/7")
+
+    assert result.returncode == 0, result.stderr
+    updates = policy_calls(calls, "update")
+    assert len(updates) == len(ALERTS) and not policy_calls(calls, "create")
+    assert all(" projects/1/alertPolicies/7 --policy-from-file=" in c for c in updates)
+
+
+@needs_bash
+def test_apply_stops_when_two_policies_have_the_name(tmp_path):
+    two = "projects/1/alertPolicies/a\nprojects/1/alertPolicies/b"
+    result, calls, _, _ = apply(tmp_path, policies=two)
+
+    assert result.returncode != 0 and "2 alert policies are named" in result.stderr
+    assert not policy_calls(calls, "update") and not policy_calls(calls, "create")
+
+
+@needs_bash
+@pytest.mark.parametrize("emails", ["not-an-email", "a@b.ca|x", 'a"@b.ca'])
+def test_apply_rejects_a_bad_alert_email(tmp_path, emails):
+    result, calls, _, _ = apply(tmp_path, alert_emails=emails)
+
+    assert result.returncode != 0 and "is not an email address" in result.stderr
+    assert not policy_calls(calls, "create") and not any("channels create" in c for c in calls)
+
+
+@needs_bash
+@pytest.mark.parametrize(("metric_service", "ok"), [(SERVICE, True), ("navcare-api-prod", False)])
+def test_apply_checks_the_service_of_metrics_that_name_it_in_the_payload(tmp_path, monkeypatch,
+                                                                         metric_service, ok):
+    # Correctness metrics name the service as jsonPayload.service, not the Cloud Run resource.
+    monkeypatch.setenv("FAKE_FILTER_KEY", "jsonPayload.service")
+    result, calls, _, _ = apply(tmp_path, exists=True, metric_service=metric_service)
+
+    assert (result.returncode == 0) == ok, result.stderr
+    if not ok:
+        assert "does not read navcare-api-dev" in result.stderr
+        assert not any("metrics update" in c for c in calls)

@@ -188,6 +188,21 @@ def test_split_sends_no_header_records_no_forced_engine_and_does_not_compare(tmp
     assert all("engine" not in record for record in read_results(tmp_path))
 
 
+def test_api_key_from_the_environment_goes_on_every_request(tmp_path, monkeypatch):
+    monkeypatch.setenv(run.API_KEY_ENV_VAR, "secret-key")
+    transport, calls = fake_api(lambda request: (200, {"engine": "v1"}))
+    run.main(args_for(tmp_path, "--max-requests", "2", "--no-check"), transport=transport)
+    assert [call.headers.get("X-API-Key") for call in calls] == ["secret-key", "secret-key"]
+    assert "secret-key" not in (tmp_path / "results.jsonl").read_text(encoding="utf-8")
+
+
+def test_no_api_key_sends_no_header(tmp_path, monkeypatch):
+    monkeypatch.delenv(run.API_KEY_ENV_VAR, raising=False)
+    transport, calls = fake_api(lambda request: (200, {"engine": "v1"}))
+    run.main(args_for(tmp_path, "--max-requests", "1", "--no-check"), transport=transport)
+    assert "X-API-Key" not in calls[0].headers
+
+
 def test_timeouts_and_errors_are_recorded_as_non_200(tmp_path, capsys):
     count = 0
 
@@ -384,3 +399,28 @@ def test_every_scenario_through_the_real_v1_api_passes_the_checker(tmp_path, cap
     assert all(r["response"]["call_911"] is True for r in chest_pain)  # the safety net
     assert "v1: 25 requests, 0 failed (0.0%" in output
     assert "v1: 25/25 correct (100.0%), 0 non-200 not checked" in output
+
+
+def test_rate_limit_warning_counts_the_comparisons():
+    # v2 at 25/min: 1 in 5 scenarios has no message, so comparisons add 5/min -> 30, at the limit.
+    at_limit = run.parse_args(["--engine", "v2", "--rate", "25", "--duration", "600",
+                               "--max-requests", "250"])
+    assert run.rate_limit_warning(at_limit, *run.plan(at_limit)) is None
+    over = run.parse_args(["--engine", "v2", "--rate", "30", "--duration", "600",
+                           "--max-requests", "300"])
+    warning = run.rate_limit_warning(over, *run.plan(over))
+    assert warning and "36 requests/min" in warning
+    no_compare = run.parse_args(["--engine", "v2", "--rate", "30", "--duration", "600",
+                                 "--max-requests", "300", "--no-compare"])
+    assert run.rate_limit_warning(no_compare, *run.plan(no_compare)) is None
+
+
+def test_plan_prints_the_rate_limit_warning(capsys):
+    code = run.main(["--engine", "v2", "--rate", "30", "--duration", "600",
+                     "--max-requests", "300", "--dry-run"])
+    assert code == 0
+    assert "429" in capsys.readouterr().err
+
+    run.main(["--engine", "v2", "--rate", "25", "--duration", "600", "--max-requests", "250",
+              "--dry-run"])
+    assert "429" not in capsys.readouterr().err

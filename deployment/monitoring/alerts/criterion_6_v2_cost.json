@@ -1,0 +1,28 @@
+{
+  "displayName": "NavCare canary (__SERVICE__): Criterion 6: v2 model cost over $0.05 per request",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "subject": "NavCare canary (__SERVICE__): Criterion 6: v2 model cost over $0.05 per request",
+    "content": "The average estimated Gemini cost of requests that went to v2 is over $0.05 on the known estimates alone. (Unknown costs alone mean hold: see the dashboard's *INCOMPLETE* line.)\n\n**Action (docs/canary.md): rollback.** Confirm with the step check first, since the dashboard's counts are approximate:\n\n    python -m loadtest.step_check <results.jsonl> --percent <step> --logs logs.json --baseline <step0.jsonl>\n\nIf it says ROLLBACK: `deployment/canary.sh rollback` (and `deployment/canary.sh fault off` if fault injection is on).\n\nDashboard: \"NavCare canary: __SERVICE__\"."
+  },
+  "userLabels": {
+    "app": "navcare",
+    "service": "__SERVICE__"
+  },
+  "severity": "CRITICAL",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "average known model-token cost > $0.05",
+      "conditionPrometheusQueryLanguage": {
+        "query": "((sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_sum{monitored_resource=\"cloud_run_revision\"}[10m])) / sum(increase(logging_googleapis_com:user___PREFIX___model_cost_usd_count{monitored_resource=\"cloud_run_revision\"}[10m])))) > 0.05",
+        "duration": "0s",
+        "evaluationInterval": "60s"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": []
+}
