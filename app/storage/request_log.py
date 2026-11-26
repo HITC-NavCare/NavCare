@@ -60,18 +60,20 @@ def build_record(fields: dict, inputs: dict, result: dict | None = None) -> dict
         "limit": inputs.get("limit"),
         "radius_km": inputs.get("radius_km"),
         "has_message": inputs.get("has_message"),
-        "hospital_ids": [r["id"] for r in (result or {}).get("recommendations", [])],
+        "hospital_ids": [r["hospital"]["id"] for r in (result or {}).get("recommendations", [])],
         # true / false / null: null means nobody read the message (v1 or fallback).
         "call_911": (result or {}).get("call_911"),
     })
     return record
 
 
-def save(record: dict[str, Any]) -> None:
-    """Write the record. Never raises: a Firestore problem must not fail the request."""
+def save(fields: dict, inputs: dict, result: dict | None = None) -> None:
+    """Build and write the record. Never raises: request_log must not fail a request."""
     if not _enabled():
         return
+    record = {}
     try:
+        record = build_record(fields, inputs, result)
         client = _get_client()
         if client is None:
             return
@@ -79,7 +81,8 @@ def save(record: dict[str, Any]) -> None:
             record, timeout=WRITE_TIMEOUT_SECONDS
         )
     except Exception as error:
-        logger.warning("request_log write failed for %s: %s", record.get("request_id"), error)
+        logger.warning("request_log write failed for %s: %s",
+                       record.get("request_id") or fields.get("request_id"), error)
 
 def outputs_from_response(response: dict) -> dict:
     """Fields of a 200 response that go into the request_log document."""

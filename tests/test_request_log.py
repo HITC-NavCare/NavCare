@@ -18,7 +18,7 @@ FAKE_V1 = {
     "radius_km": 10,
     "weather_now": {},
     "travel_time_multiplier": 1.0,
-    "recommendations": [{"id": "11111111"}, {"id": "22222222"}],
+    "recommendations": [{"hospital": {"id": "11111111"}}, {"hospital": {"id": "22222222"}}],
     "unranked_nearby": [],
     "disclaimer": orchestrator.DISCLAIMER,
 }
@@ -63,7 +63,7 @@ def test_200_v1_writes_one_document(client, fake_firestore, use_engine, v1_ok):
     assert doc["limit"] == 3 and doc["radius_km"] == 10
     assert doc["has_message"] is True
     assert "ankle" not in str(doc)  # no raw message text anywhere
-    assert doc["hospital_ids"] == [h["id"] for h in body["recommendations"]]
+    assert doc["hospital_ids"] == [h["hospital"]["id"] for h in body["recommendations"]]
     assert doc["call_911"] is None  # v1 did not read the message
     assert doc["latency_ms"] is not None
 
@@ -129,6 +129,14 @@ def test_firestore_failure_does_not_fail_request(client, fake_firestore, use_eng
 def test_disabled_writes_nothing(client, fake_firestore, use_engine, v1_ok, monkeypatch):
     use_engine("v1")
     monkeypatch.setenv("REQUEST_LOG_ENABLED", "false")
+    r = client.get("/v1/recommendations", params=PARAMS)
+    assert r.status_code == 200
+    assert fake_firestore.docs == {}
+
+def test_bad_record_does_not_fail_request(client, fake_firestore, use_engine, monkeypatch):
+    use_engine("v1")
+    broken = {**FAKE_V1, "recommendations": [{"no_id_here": 1}]}
+    monkeypatch.setattr(orchestrator, "build_recommendations", lambda *a, **k: dict(broken))
     r = client.get("/v1/recommendations", params=PARAMS)
     assert r.status_code == 200
     assert fake_firestore.docs == {}

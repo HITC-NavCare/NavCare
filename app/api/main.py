@@ -130,8 +130,7 @@ async def internal_error(request: Request, error: Exception):
                                     f"request_id={request_id} unexpected error", exc_info=error)
         response = error_response(500, "internal_error", INTERNAL_ERROR_MESSAGE, request_id)
         response.background = BackgroundTask(
-            request_log.save,
-            request_log.build_record(fields, getattr(request.state, "log_inputs", {})),
+            request_log.save, fields, getattr(request.state, "log_inputs", {})
         )
         return response
     return error_response(500, "internal_error", INTERNAL_ERROR_MESSAGE, request_id)
@@ -188,8 +187,7 @@ def get_recommendations(
         # A data service (routing, weather or ER status) failed: say so, don't guess.
         fields = log_recommendation(request, 503, engine, logging.WARNING,
             f"request_id={request_id} data unavailable: {error}", model_usage=getattr(error, "model_usage", None))
-        background_tasks.add_task(
-            request_log.save, request_log.build_record(fields, request.state.log_inputs))
+        background_tasks.add_task(request_log.save, fields, request.state.log_inputs)
         return error_response(503, "data_unavailable", DATA_UNAVAILABLE_MESSAGE, request_id)
 
     result = dict(result)
@@ -202,8 +200,7 @@ def get_recommendations(
     else:
         fields = log_recommendation(request, 200, result["engine"],
                            model_usage=result.get("model_usage"))
-    background_tasks.add_task(
-        request_log.save, request_log.build_record(fields, request.state.log_inputs, result))
+        background_tasks.add_task(request_log.save, fields, request.state.log_inputs, result)
     return {
         "request_id": request_id,
         "requested_at": datetime.now(MONTREAL).isoformat(),
