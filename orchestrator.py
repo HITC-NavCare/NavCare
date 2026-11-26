@@ -83,7 +83,11 @@ def build_agent_recommendations(
         else:
             reason = f"unexpected {type(error).__name__} in v2: {error}"
             logger.error("v2 failed unexpectedly; v1 answers instead", exc_info=error)
-        response = build_recommendations(user_lat, user_lon, limit=limit, radius_km=radius_km)
+        try:
+            response = build_recommendations(user_lat, user_lon, limit=limit, radius_km=radius_km)
+        except RuntimeError as fallback_error:
+            fallback_error.model_usage = getattr(error, "model_usage", None)
+            raise
         response.update({
             "engine": "v1_fallback",
             "fallback_reason": reason,
