@@ -19,8 +19,9 @@ IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/api:$(git rev-parse --short HEAD
 ENGINE_HEADER_ENABLED="${ENGINE_HEADER_ENABLED:-false}"
 if [ "$ENV" != dev ]; then ENGINE_HEADER_ENABLED=false; fi
 # For CI (.github/workflows/deploy.yml), so the deployer account needs fewer permissions:
-# BUILD_LOGS=false waits for the build without streaming its logs (streaming needs project
-# Viewer; the logs stay in Cloud Build), and STAGING_BUCKET names the bucket for the source
+# BUILD_LOGS=false starts the build with --async and polls its status: gcloud refuses to wait on
+# a build whose logs it can't read (needs project Viewer), even with --suppress-logs. The logs
+# stay in Cloud Build. STAGING_BUCKET names the bucket for the source
 # upload (the default bucket lookup lists every bucket in the project).
 BUILD_LOGS="${BUILD_LOGS:-true}"
 STAGING_BUCKET="${STAGING_BUCKET:-}"
@@ -37,9 +38,21 @@ fi
 SOURCE="$(mktemp -d)/source.tgz"
 git archive --format=tar.gz -o "$SOURCE" HEAD
 BUILD_FLAGS=(--region="$REGION" --tag="$IMAGE")
-if [ "$BUILD_LOGS" = false ]; then BUILD_FLAGS+=(--suppress-logs); fi
 if [ -n "$STAGING_BUCKET" ]; then BUILD_FLAGS+=(--gcs-source-staging-dir="gs://$STAGING_BUCKET/source"); fi
-gc builds submit "$SOURCE" "${BUILD_FLAGS[@]}"
+if [ "$BUILD_LOGS" = false ]; then
+  BUILD_ID="$(gc builds submit "$SOURCE" "${BUILD_FLAGS[@]}" --async --format='value(id)')"
+  echo "Build $BUILD_ID started; logs in the console (Cloud Build > History)."
+  while :; do
+    STATUS="$(gc builds describe "$BUILD_ID" --region="$REGION" --format='value(status)')"
+    case "$STATUS" in
+      SUCCESS) echo "Build $BUILD_ID: SUCCESS"; break ;;
+      QUEUED|PENDING|WORKING) sleep "${BUILD_POLL_SECONDS:-10}" ;;
+      *) echo "Build $BUILD_ID ended with status ${STATUS:-unknown}" >&2; exit 1 ;;
+    esac
+  done
+else
+  gc builds submit "$SOURCE" "${BUILD_FLAGS[@]}"
+fi
 
 # 3. Deploy. The canary share is set only when the service is created, so a redeploy keeps it.
 ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENGINE_HEADER_ENABLED=$ENGINE_HEADER_ENABLED"

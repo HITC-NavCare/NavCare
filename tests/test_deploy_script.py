@@ -12,8 +12,13 @@ FAKE_GCLOUD = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FAKE_LOG"
 case "$*" in
   *"--format=value(status.url)"*) echo "https://fake.run.app"; exit 0 ;;
+  *" builds describe "*)  # the CI build's status: the next line of $FAKE_BUILD_STATUSES
+    n=$(grep -c " builds describe " "$FAKE_LOG")
+    sed -n "${n}p" <<< "${FAKE_BUILD_STATUSES:-SUCCESS}"; exit 0 ;;
   *" describe "*) exit "$FAKE_DESCRIBE_EXIT" ;;
-  *" builds submit "*) tar -tzf "$5" > "$FAKE_LOG.archive" ;;  # $5: after --project, --quiet
+  *" builds submit "*)
+    tar -tzf "$5" > "$FAKE_LOG.archive"  # $5: after --project, --quiet
+    case "$*" in *--async*) echo "build-123" ;; esac ;;
 esac
 """
 # Windows needs Git Bash (MSYSTEM set); the bash.exe in System32 is WSL.
@@ -21,20 +26,21 @@ BASH = shutil.which("bash") if os.name != "nt" or os.environ.get("MSYSTEM") else
 pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash (Git Bash on Windows)")
 
 
-def deploy(tmp_path, existing=False, **env):
+def deploy(tmp_path, existing=False, expect_ok=True, **env):
     fake = tmp_path / "gcloud"
     fake.write_text(FAKE_GCLOUD, newline="\n")
     fake.chmod(0o755)  # deploy.sh runs it directly; Linux needs the execute bit
     log = tmp_path / "calls.log"
     run_env = {**os.environ, "GCLOUD": fake.as_posix(), "FAKE_LOG": log.as_posix(),
                "FAKE_DESCRIBE_EXIT": "0" if existing else "1", **env}
+    run_env.setdefault("BUILD_POLL_SECONDS", "0")
     for name in ("PROJECT_ID", "ENV", "SERVICE", "ENGINE_HEADER_ENABLED", "MAX_INSTANCES",
-                 "BUILD_LOGS", "STAGING_BUCKET"):
+                 "BUILD_LOGS", "STAGING_BUCKET", "FAKE_BUILD_STATUSES"):
         if name not in env:
             run_env.pop(name, None)
     result = subprocess.run([BASH, "deployment/deploy.sh"], cwd=REPO, env=run_env,
                             capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, result.stderr
+    assert (result.returncode == 0) == expect_ok, result.stderr
     archive = Path(f"{log}.archive")
     return log.read_text().splitlines(), archive.read_text().split() if archive.exists() else []
 
@@ -101,7 +107,8 @@ def test_build_streams_logs_and_picks_the_bucket_by_default(tmp_path):
     calls, _ = deploy(tmp_path)
 
     build = only(calls, "builds submit")
-    assert "--suppress-logs" not in build and "--gcs-source-staging-dir" not in build
+    assert "--async" not in build and "--gcs-source-staging-dir" not in build
+    assert not any("builds describe" in c for c in calls)
 
 
 def test_ci_build_skips_the_log_stream_and_names_the_bucket(tmp_path):
@@ -109,9 +116,25 @@ def test_ci_build_skips_the_log_stream_and_names_the_bucket(tmp_path):
     calls, _ = deploy(tmp_path, existing=True, BUILD_LOGS="false", STAGING_BUCKET="proj_cloudbuild")
 
     build = only(calls, "builds submit")
-    assert "--suppress-logs" in build
+    assert "--async" in build and "--suppress-logs" not in build
     assert "--gcs-source-staging-dir=gs://proj_cloudbuild/source" in build
     assert "V2_TRAFFIC_PERCENT" not in only(calls, "run deploy")
+
+
+def test_ci_build_waits_for_the_build_status_then_deploys(tmp_path):
+    calls, _ = deploy(tmp_path, existing=True, BUILD_LOGS="false",
+                      FAKE_BUILD_STATUSES="QUEUED\nWORKING\nSUCCESS")
+    polls = [c for c in calls if "builds describe build-123" in c]
+    assert len(polls) == 3
+    # The deploy comes after the last poll, never before the build succeeded.
+    assert calls.index(only(calls, "run deploy")) > calls.index(polls[-1])
+
+
+@pytest.mark.parametrize("status", ["FAILURE", "TIMEOUT", "CANCELLED", ""])
+def test_ci_build_failure_stops_before_the_deploy(tmp_path, status):
+    calls, _ = deploy(tmp_path, existing=True, expect_ok=False, BUILD_LOGS="false",
+                      FAKE_BUILD_STATUSES=f"WORKING\n{status}")
+    assert not any("run deploy" in c for c in calls)
 
 
 def test_build_uploads_only_committed_files(tmp_path):
