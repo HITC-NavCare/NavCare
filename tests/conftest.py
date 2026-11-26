@@ -3,6 +3,7 @@ import pytest
 from app.agent_v2 import fault_injection
 from app.storage import request_log
 
+
 @pytest.fixture(autouse=True)
 def no_injected_faults(monkeypatch):
     # The API loads .env on import; don't let a local fault setting leak into tests.

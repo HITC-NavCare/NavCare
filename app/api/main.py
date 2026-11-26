@@ -186,7 +186,8 @@ def get_recommendations(
     except RuntimeError as error:
         # A data service (routing, weather or ER status) failed: say so, don't guess.
         fields = log_recommendation(request, 503, engine, logging.WARNING,
-            f"request_id={request_id} data unavailable: {error}", model_usage=getattr(error, "model_usage", None))
+            f"request_id={request_id} data unavailable: {error}",
+              model_usage=getattr(error, "model_usage", None))
         background_tasks.add_task(request_log.save, fields, request.state.log_inputs)
         return error_response(503, "data_unavailable", DATA_UNAVAILABLE_MESSAGE, request_id)
 

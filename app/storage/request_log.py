@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
 from typing import Any
-from fastapi import BackgroundTasks, FastAPI, Header, Query, Request
-from starlette.background import BackgroundTask
-
-from app.storage import request_log
 
 logger = logging.getLogger("navcare.request_log")
 
