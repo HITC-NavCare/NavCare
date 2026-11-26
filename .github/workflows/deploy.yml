@@ -1,0 +1,103 @@
+# Every merge to main: ruff and pytest, then deploy navcare-api-dev with deployment/deploy.sh,
+# check the serving image is this commit, and run the v1 smoke test (#30).
+# Pause it during canary steps and the demo: repository variable DEPLOY_PAUSED=true (the checks
+# still run). One-time setup: deployment/setup_ci.sh (project Owner), see the README.
+name: Deploy dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # manual redeploy of main (Actions > Deploy dev > Run workflow)
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/lint.yml
+
+  deploy:
+    needs: checks
+    # Google accepts the sign-in only from main; the pause skips the deploy, not the checks.
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Merges deploy one at a time, in order; a running deploy is never cancelled.
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # GitHub's sign-in token for Workload Identity Federation; no key file
+    env:
+      PROJECT_ID: project-69a1b17d-f37d-485c-912
+      REGION: northamerica-northeast1
+      SERVICE: navcare-api-dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the setup variables
+        env:
+          PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOYER: ${{ vars.GCP_DEPLOYER_SA }}
+          NAVCARE_API_KEY: ${{ secrets.NAVCARE_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER" ] || [ -z "$DEPLOYER" ]; then
+            echo "::error::Set the repository variables GCP_WORKLOAD_IDENTITY_PROVIDER and GCP_DEPLOYER_SA (printed by deployment/setup_ci.sh), or set DEPLOY_PAUSED=true."
+            exit 1
+          fi
+          if [ -z "$NAVCARE_API_KEY" ]; then
+            echo "::error::Set the repository secret NAVCARE_API_KEY (the ci key from the NAVCARE_API_KEYS secret), or set DEPLOY_PAUSED=true."
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy
+        env:
+          ENV: dev  # ENGINE_HEADER_ENABLED stays off; the canary share is kept
+          BUILD_LOGS: "false"
+          STAGING_BUCKET: ${{ env.PROJECT_ID }}_cloudbuild
+        run: deployment/deploy.sh
+
+      - name: Check the serving image is this commit
+        id: service
+        run: |
+          expected="$(git rev-parse --short HEAD)"
+          found="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" \
+            --region="$REGION" --format='value(status.url,spec.template.spec.containers[0].image)')"
+          read -r url image <<< "$found"
+          echo "Serving $image at $url"
+          if [ "${image##*:}" != "$expected" ]; then
+            echo "::error::The service runs ${image##*:}, expected $expected"
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # navcare-api-dev is public, but the smoke test also sends an ID token of the deployer, so it
+      # keeps working if the service is made private.
+      - id: token
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.url }}
+          id_token_include_email: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+
+      - name: Smoke test (health and one v1 request, no forced v2)
+        env:
+          ID_TOKEN: ${{ steps.token.outputs.id_token }}
+          NAVCARE_API_KEY: ${{ secrets.NAVCARE_API_KEY }}  # X-API-Key for /v1/recommendations (#49)
+          URL: ${{ steps.service.outputs.url }}
+        run: python -m deployment.smoke_test "$URL"
